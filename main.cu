@@ -1,9 +1,12 @@
 ﻿#include "CosmosCuda.cuh"
 
+// Change these values to utilize your gpu better (currently they are tuned for RTX4070)
+// Constants::BLOCKS
+// Constants::THREADS
 int main() {
     const int numNbodySimulationsPerRender = 5;
     srand(time(0));
-    Universe uni(1000 * 1000 * 100);
+    Universe uni(1000 * 1000 * 20);
     uni.calcFilterFft2D();
     while (true) {
         uni.startBenchmark();

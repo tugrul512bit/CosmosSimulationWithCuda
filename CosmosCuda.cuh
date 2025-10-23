@@ -33,9 +33,9 @@ inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort =
 }
 
 namespace Constants {
-    // Constants::N can be only power of 2. The higher Constants::N the better approximation.
+    // Constants::N can be only power of 2. The higher Constants::N, the better approximation. For full accuracy, it needs a truncated filter lattice + closes-neighbor search algorithm (for scientific work).
     constexpr int N = 2048;
-    // RTX4070
+    // RTX4070 specs (1536 resident threads per SM, 46 SMs)
     constexpr int BLOCKS = 46 * 3;
     constexpr int THREADS = 512;
     // FFT uses these
@@ -503,7 +503,6 @@ struct Universe {
     // For OpenCV
     cv::Mat mat;
     int numParticles;
-    int tileSize;
 
     // For device
     cudaEvent_t eventStart;
@@ -516,9 +515,8 @@ struct Universe {
     float* vx_d;
     float* vy_d;
     float* renderColor_d;
-    Universe(int particles = 0, int tileSizeParameter = 32) {
-        cudaSetDevice(0);
-        tileSize = tileSizeParameter;
+    Universe(int particles = 0, int cudaDevice = 0) {
+        cudaSetDevice(cudaDevice);
         numParticles = particles;
         x.resize(particles);
         vx.resize(particles);
@@ -643,7 +641,7 @@ struct Universe {
 
 
         cv::Mat resized;
-        cv::resize(mat, resized, cv::Size(1280, 1280), 0, 0, cv::INTER_LINEAR);
+        cv::resize(mat, resized, cv::Size(1380, 1380), 0, 0, cv::INTER_LINEAR);
 
         cv::imshow("Fast Nbody", resized);
     }
