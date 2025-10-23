@@ -16,12 +16,12 @@ inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort =
 
 namespace Constants {
     // Constants::N can be only power of 2. The higher Constants::N the better approximation.
-    constexpr int Constants::N = 2048;
+    constexpr int N = 2048;
     // RTX4070
-    const int BLOCKS = 46 * 3;
-    const int THREADS = 512;
+    constexpr int BLOCKS = 46 * 3;
+    constexpr int THREADS = 512;
     // FFT uses these
-    constexpr double Constants::MATH_PI = 3.14159265358979323846;
+    constexpr double MATH_PI = 3.14159265358979323846;
     using ComplexVar = float2;
 }
 
@@ -34,8 +34,8 @@ namespace Kernels {
         return result;
     }
     __device__ Constants::ComplexVar wCoefficients[Constants::N * 2];
-    __device__ __forceinline__ Constants::ComplexVar d_wForNk(const double Constants::N, const double k) {
-        const double angle = (-2.0 * Constants::MATH_PI * k) / Constants::N;
+    __device__ __forceinline__ Constants::ComplexVar d_wForNk(const double N, const double k) {
+        const double angle = (-2.0 * Constants::MATH_PI * k) / N;
         return makeComplexVar(cos(angle), -sin(angle));
     }
     template<int N>
@@ -97,8 +97,8 @@ namespace Kernels {
         const unsigned int thread = threadIdx.x;
         const unsigned int warpLane = thread & 31;
         const unsigned int block = blockIdx.x;
-        constexpr unsigned int gridSteps = (Constants::N + BLOCKS - 1) / BLOCKS;
-        constexpr unsigned int blockSteps = (Constants::N + THREADS - 1) / THREADS;
+        constexpr unsigned int gridSteps = (Constants::N + Constants::BLOCKS - 1) / Constants::BLOCKS;
+        constexpr unsigned int blockSteps = (Constants::N + Constants::THREADS - 1) / Constants::THREADS;
         const float inverseMult = inverse ? -1.0f : 1.0f;
         const float divider = inverse ? Constants::N : 1.0f;
         Constants::ComplexVar vars[blockSteps];
@@ -106,11 +106,11 @@ namespace Kernels {
 
 
         for (unsigned int grid = 0; grid < gridSteps; grid++) {
-            const unsigned int row = grid * BLOCKS + block;
+            const unsigned int row = grid * Constants::BLOCKS + block;
             if (row < Constants::N) {
 #pragma unroll
                 for (int blc = 0; blc < blockSteps; blc++) {
-                    const unsigned int col = blc * THREADS + thread;
+                    const unsigned int col = blc * Constants::THREADS + thread;
                     const int element = col + row * Constants::N;
                     if (col < Constants::N) {
                         s_coalescing[col] = __ldg(&data[element]);
@@ -119,7 +119,7 @@ namespace Kernels {
                 __syncthreads();
 #pragma unroll
                 for (int blc = 0; blc < blockSteps; blc++) {
-                    const unsigned int col = blc * THREADS + thread;
+                    const unsigned int col = blc * Constants::THREADS + thread;
                     Constants::ComplexVar var;
                     if (col < Constants::N) {
                         vars[blc] = s_coalescing[__brev(col) >> (32 - d_bits<Constants::N>())];
@@ -131,7 +131,7 @@ namespace Kernels {
                 __syncthreads();
 #pragma unroll
                 for (int blc = 0; blc < blockSteps; blc++) {
-                    const unsigned int col = blc * THREADS + thread;
+                    const unsigned int col = blc * Constants::THREADS + thread;
                     const int element = col + row * Constants::N;
                     if (col < Constants::N) {
                         s_coalescing[col] = vars[blc];
@@ -146,7 +146,7 @@ namespace Kernels {
                     const int leveld2 = level / 2;
 #pragma unroll
                     for (int blc = 0; blc < blockSteps; blc++) {
-                        const unsigned int col = blc * THREADS + thread;
+                        const unsigned int col = blc * Constants::THREADS + thread;
                         if (col < Constants::N) {
                             const int idx = (col % level2);
                             const bool firstHalf = idx < level;
@@ -166,7 +166,7 @@ namespace Kernels {
                     __syncthreads();
 #pragma unroll
                     for (int blc = 0; blc < blockSteps; blc++) {
-                        const unsigned int col = blc * THREADS + thread;
+                        const unsigned int col = blc * Constants::THREADS + thread;
                         if (col < Constants::N) {
                             s_coalescing[col] = vars[blc];
                         }
@@ -175,7 +175,7 @@ namespace Kernels {
                 }
 #pragma unroll
                 for (int blc = 0; blc < blockSteps; blc++) {
-                    const unsigned int col = blc * THREADS + thread;
+                    const unsigned int col = blc * Constants::THREADS + thread;
                     const int element = col + row * Constants::N;
                     if (col < Constants::N) {
                         vars[blc].x /= divider;
@@ -527,8 +527,8 @@ struct Universe {
         cudaFuncSetAttribute(Kernels::k_calcFftBatched1D<Constants::N>, cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxShared);
         cudaFuncSetAttribute(Kernels::k_calcFftBatched1D<Constants::N>, cudaFuncAttributeMaxDynamicSharedMemorySize, Constants::N * sizeof(Constants::ComplexVar));
         Kernels::k_fillCoefficientArray<Constants::N> << <1, 1024 >> > ();
-        Kernels::k_fillPairIndexList<Constants::N> << <BLOCKS, THREADS >> > ();
-        Kernels::k_generateFilterLattice<Constants::N> << <BLOCKS, THREADS >> > (filter_d);
+        Kernels::k_fillPairIndexList<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > ();
+        Kernels::k_generateFilterLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (filter_d);
         gpuErrchk(cudaDeviceSynchronize());
         cv::namedWindow("Fast Nbody");
     }
@@ -537,42 +537,42 @@ struct Universe {
     }
     // todo: scatter on 9 cells per mass
     void scatterMassOnLattice() {
-        Kernels::k_clearLattice<Constants::N> << <BLOCKS, THREADS >> > (lattice_d);
-        Kernels::k_scatterMassOnLattice<Constants::N> << <BLOCKS, THREADS >> > (lattice_d, x_d, y_d, numParticles);
+        Kernels::k_clearLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
+        Kernels::k_scatterMassOnLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, x_d, y_d, numParticles);
 
     }
     void calcLatticeFft2D() {
-        Kernels::k_calcFftBatched1D<Constants::N> << <BLOCKS, THREADS, Constants::N * sizeof(Constants::ComplexVar) >> > (lattice_d, false);
-        Kernels::k_calcTranspose<Constants::N> << <BLOCKS, THREADS >> > (lattice_d);
-        Kernels::k_calcTransposeDiagonals<Constants::N> << <BLOCKS, THREADS >> > (lattice_d);
-        Kernels::k_calcFftBatched1D<Constants::N> << <BLOCKS, THREADS, Constants::N * sizeof(Constants::ComplexVar) >> > (lattice_d, false);
-        Kernels::k_calcTranspose<Constants::N> << <BLOCKS, THREADS >> > (lattice_d);
-        Kernels::k_calcTransposeDiagonals<Constants::N> << <BLOCKS, THREADS >> > (lattice_d);
+        Kernels::k_calcFftBatched1D<Constants::N> << <Constants::BLOCKS, Constants::THREADS, Constants::N * sizeof(Constants::ComplexVar) >> > (lattice_d, false);
+        Kernels::k_calcTranspose<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
+        Kernels::k_calcTransposeDiagonals<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
+        Kernels::k_calcFftBatched1D<Constants::N> << <Constants::BLOCKS, Constants::THREADS, Constants::N * sizeof(Constants::ComplexVar) >> > (lattice_d, false);
+        Kernels::k_calcTranspose<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
+        Kernels::k_calcTransposeDiagonals<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
 
     }
     void calcFilterFft2D() {
-        Kernels::k_calcFftBatched1D<Constants::N> << <BLOCKS, THREADS, Constants::N * sizeof(Constants::ComplexVar) >> > (filter_d, false);
-        Kernels::k_calcTranspose<Constants::N> << <BLOCKS, THREADS >> > (filter_d);
-        Kernels::k_calcTransposeDiagonals<Constants::N> << <BLOCKS, THREADS >> > (filter_d);
-        Kernels::k_calcFftBatched1D<Constants::N> << <BLOCKS, THREADS, Constants::N * sizeof(Constants::ComplexVar) >> > (filter_d, false);
-        Kernels::k_calcTranspose<Constants::N> << <BLOCKS, THREADS >> > (filter_d);
-        Kernels::k_calcTransposeDiagonals<Constants::N> << <BLOCKS, THREADS >> > (filter_d);
+        Kernels::k_calcFftBatched1D<Constants::N> << <Constants::BLOCKS, Constants::THREADS, Constants::N * sizeof(Constants::ComplexVar) >> > (filter_d, false);
+        Kernels::k_calcTranspose<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (filter_d);
+        Kernels::k_calcTransposeDiagonals<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (filter_d);
+        Kernels::k_calcFftBatched1D<Constants::N> << <Constants::BLOCKS, Constants::THREADS, Constants::N * sizeof(Constants::ComplexVar) >> > (filter_d, false);
+        Kernels::k_calcTranspose<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (filter_d);
+        Kernels::k_calcTransposeDiagonals<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (filter_d);
 
     }
     void multiplyLatticeFilterElementwise() {
-        Kernels::k_multElementwiseLatticeFilter<Constants::N> << <BLOCKS, THREADS >> > (lattice_d, filter_d);
+        Kernels::k_multElementwiseLatticeFilter<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, filter_d);
     }
     void calcLatticeIfft2D() {
-        Kernels::k_calcFftBatched1D<Constants::N> << <BLOCKS, THREADS, Constants::N * sizeof(Constants::ComplexVar) >> > (lattice_d, true);
-        Kernels::k_calcTranspose<Constants::N> << <BLOCKS, THREADS >> > (lattice_d);
-        Kernels::k_calcTransposeDiagonals<Constants::N> << <BLOCKS, THREADS >> > (lattice_d);
-        Kernels::k_calcFftBatched1D<Constants::N> << <BLOCKS, THREADS, Constants::N * sizeof(Constants::ComplexVar) >> > (lattice_d, true);
-        Kernels::k_calcTranspose<Constants::N> << <BLOCKS, THREADS >> > (lattice_d);
-        Kernels::k_calcTransposeDiagonals<Constants::N> << <BLOCKS, THREADS >> > (lattice_d);
+        Kernels::k_calcFftBatched1D<Constants::N> << <Constants::BLOCKS, Constants::THREADS, Constants::N * sizeof(Constants::ComplexVar) >> > (lattice_d, true);
+        Kernels::k_calcTranspose<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
+        Kernels::k_calcTransposeDiagonals<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
+        Kernels::k_calcFftBatched1D<Constants::N> << <Constants::BLOCKS, Constants::THREADS, Constants::N * sizeof(Constants::ComplexVar) >> > (lattice_d, true);
+        Kernels::k_calcTranspose<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
+        Kernels::k_calcTransposeDiagonals<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
     }
     void multiSampleForces() {
-        Kernels::k_shiftLattice<Constants::N> << <BLOCKS, THREADS >> > (lattice_d, latticeShifted_d);
-        Kernels::k_forceMultiSampling<Constants::N> << <BLOCKS, THREADS >> > (latticeShifted_d, x_d, y_d, vx_d, vy_d, numParticles);
+        Kernels::k_shiftLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, latticeShifted_d);
+        Kernels::k_forceMultiSampling<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (latticeShifted_d, x_d, y_d, vx_d, vy_d, numParticles);
     }
     void stopBenchmark() {
         gpuErrchk(cudaEventRecord(eventStop));
