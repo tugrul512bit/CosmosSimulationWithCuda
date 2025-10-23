@@ -1,8 +1,9 @@
 ﻿#include "CosmosCuda.cuh"
-
 // Change these values to utilize your gpu better (currently they are tuned for RTX4070)
 // Constants::BLOCKS
 // Constants::THREADS
+// Change this to another power-of-2 to tune accuracy of long-ranged forces. Short-ranged forces are not calculated currently (todo).
+// Constants::N
 int main() {
     const int numNbodySimulationsPerRender = 5;
     srand(time(0));

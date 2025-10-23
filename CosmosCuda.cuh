@@ -1,3 +1,10 @@
+/*
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2025 [Huseyin Tugrul BUYUKISIK]
+ *
+ * This file is part of the CosmosSimulationWithCuda project.
+ * See LICENSE in the root of the project for details.
+ */
 #define __CUDACC__
 #include <opencv2/opencv.hpp>
 #include <math.h>
