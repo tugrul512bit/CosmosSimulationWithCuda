@@ -4,3 +4,17 @@
 *.ptx
 *.cubin
 *.fatbin
+
+# Visual Studio user files
+*.vcxproj.user
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# VS folder
+/.vs/
+
+# vcpkg local files
+/vcpkg_installed/
+/x64
