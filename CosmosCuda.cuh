@@ -370,14 +370,14 @@ namespace Kernels {
         }
     }
     template<int N>
-    __global__ void k_forceMultiSampling(Constants::ComplexVar* lattice_d, float* x, float* y, float* vx, float* vy, const int numParticles) {
+    __global__ void k_forceMultiSampling(const Constants::ComplexVar* const __restrict__ lattice_d, float* x, float* y, float* vx, float* vy, const int numParticles) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
         const int numThreads = blockDim.x;
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
-        
+
         // 4-wide coarsening for the memory bottleneck.
         // todo: use smem tiling for lattice re-use
         const int steps = (numParticles/4 + numTotalThreads - 1) / numTotalThreads;
