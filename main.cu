@@ -7,7 +7,7 @@
 int main() {
     const int numNbodySimulationsPerRender = 2;
     const int numParticles = 1000 * 1000 * 10;
-    const int device = 1;//rtx5070
+    const int device = 0;
     Universe cosmos(numParticles, device);
 
     while (true) {
