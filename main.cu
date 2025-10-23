@@ -5,22 +5,19 @@
 // Change this to another power-of-2 to tune accuracy of long-ranged forces. Short-ranged forces are not calculated currently (todo).
 // Constants::N
 int main() {
-    const int numNbodySimulationsPerRender = 5;
-    srand(time(0));
-    Universe uni(1000 * 1000 * 20);
-    uni.calcFilterFft2D();
+    const int numNbodySimulationsPerRender = 2;
+    const int numParticles = 1000 * 1000 * 100;
+    const int device = 1;//rtx5070
+    Universe cosmos(numParticles, device);
+
     while (true) {
-        uni.startBenchmark();
+        cosmos.startBenchmark();
         for (int i = 0; i < numNbodySimulationsPerRender; i++) {
-            uni.scatterMassOnLattice();
-            uni.calcLatticeFft2D();
-            uni.multiplyLatticeFilterElementwise();
-            uni.calcLatticeIfft2D();
-            uni.multiSampleForces();
+            cosmos.nBody();
         }
-        uni.stopBenchmark();
-        uni.sync(numNbodySimulationsPerRender);
-        uni.render();
+        cosmos.stopBenchmark();
+        cosmos.sync(numNbodySimulationsPerRender);
+        cosmos.render();
         if (cv::waitKey(1) == 27) {
             break;
         }

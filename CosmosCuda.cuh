@@ -501,6 +501,7 @@ namespace Kernels {
 }
 
 struct Universe {
+private:
     // For host
     std::vector<float> x, y;
     std::vector<float> vx, vy;
@@ -522,8 +523,10 @@ struct Universe {
     float* vx_d;
     float* vy_d;
     float* renderColor_d;
+public:
     Universe(int particles = 0, int cudaDevice = 0) {
         cudaSetDevice(cudaDevice);
+        srand(time(0));
         numParticles = particles;
         x.resize(particles);
         vx.resize(particles);
@@ -569,12 +572,18 @@ struct Universe {
         Kernels::k_fillCoefficientArray<Constants::N> << <1, 1024 >> > ();
         Kernels::k_fillPairIndexList<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > ();
         Kernels::k_generateFilterLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (filter_d);
+        calcFilterFft2D();
         gpuErrchk(cudaDeviceSynchronize());
         cv::namedWindow("Fast Nbody");
+    }
+    // todo: implement this
+    void updateParticleData() {
+
     }
     void startBenchmark() {
         gpuErrchk(cudaEventRecord(eventStart));
     }
+private:
     // todo: scatter on 9 cells per mass to improve accuracy more.
     void scatterMassOnLattice(bool renderOnly = false) {
         Kernels::k_clearLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
@@ -614,6 +623,14 @@ struct Universe {
         Kernels::k_shiftLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, latticeShifted_d);
         Kernels::k_forceMultiSampling<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (latticeShifted_d, x_d, y_d, vx_d, vy_d, numParticles);
     }
+    public:
+    void nBody() {
+        scatterMassOnLattice();
+        calcLatticeFft2D();
+        multiplyLatticeFilterElementwise();
+        calcLatticeIfft2D();
+        multiSampleForces();
+    }
     void stopBenchmark() {
         gpuErrchk(cudaEventRecord(eventStop));
     }
@@ -631,7 +648,7 @@ struct Universe {
 
         gpuErrchk(cudaMemcpy(lattice.data(), lattice_d, sizeof(Constants::ComplexVar) * Constants::N * Constants::N, cudaMemcpyDeviceToHost));
         std::vector<std::thread> renderThread;
-        const int nThr = 16;
+        const int nThr = 4;
         for (int i = 0; i < nThr; i++) {
             const int iClone = i;
             renderThread.emplace_back([&, iClone]() {
@@ -642,14 +659,11 @@ struct Universe {
                 }
             });
         }
-        for (int i = 0; i < 16; i++) {
+        for (int i = 0; i < nThr; i++) {
             renderThread[i].join();
         }
-
-
         cv::Mat resized;
         cv::resize(mat, resized, cv::Size(1380, 1380), 0, 0, cv::INTER_LINEAR);
-
         cv::imshow("Fast Nbody", resized);
     }
     ~Universe() {
