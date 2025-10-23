@@ -576,9 +576,16 @@ public:
         gpuErrchk(cudaDeviceSynchronize());
         cv::namedWindow("Fast Nbody");
     }
-    // todo: implement this
-    void updateParticleData() {
-
+    // Requires same number of particles as the simulator.
+    void updateParticleData(std::vector<float> sourceX, std::vector<float> sourceY, std::vector<float> sourceVX, std::vector<float> sourceVY) {
+        x.swap(sourceX);
+        y.swap(sourceY);
+        vx.swap(sourceVX);
+        vy.swap(sourceVY);
+        gpuErrchk(cudaMemcpy(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(vx_d, vx.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(vy_d, vy.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
     }
     void startBenchmark() {
         gpuErrchk(cudaEventRecord(eventStart));
