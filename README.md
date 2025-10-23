@@ -32,3 +32,9 @@ CUDA Nbody pipeline: 9.6755 milliseconds per step
 ![test](/testa.png)
 ![test](/testb.png)
 
+---
+# Optimizations To Add
+- Short-ranged force calculation from nearest-neighbors pair-wise: accuracy improvement
+- Partial sorting of particles in each tile: performance improvement
+- Rendering: double-buffering for more FPS
+
