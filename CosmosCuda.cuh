@@ -488,6 +488,7 @@ struct Universe {
     float* vx_d;
     float* vy_d;
     Universe(int particles = 0, int tileSizeParameter = 32) {
+        cudaSetDevice(0);
         tileSize = tileSizeParameter;
         numParticles = particles;
         x.resize(particles);
