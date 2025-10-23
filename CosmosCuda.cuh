@@ -366,43 +366,58 @@ namespace Kernels {
         const int numThreads = blockDim.x;
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
-        const int steps = (numParticles + numTotalThreads - 1) / numTotalThreads;
+        // 4-wide coarsening for the memory bottleneck.
+        // todo: use smem tiling for lattice re-use
+        const int steps = (numParticles/4 + numTotalThreads - 1) / numTotalThreads;
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
-            if (index < numParticles) {
-                const float posX = x[index];
-                const float posY = y[index];
+            if (index < numParticles/4) {
+                const float4 posXr = __ldg(reinterpret_cast<float4*>(&x[index * 4]));
+                const float4 posYr = __ldg(reinterpret_cast<float4*>(&y[index * 4]));
+                const float4 posVXr = __ldg(reinterpret_cast<float4*>(&vx[index * 4]));
+                const float4 posVYr = __ldg(reinterpret_cast<float4*>(&vy[index * 4]));
 
-                // Sampling
-                const int centerX = int(posX);
-                const int centerY = int(posY);
-                const int centerIndex = centerX + centerY * Constants::N;
-                if (centerX >= 0 && centerX < Constants::N && centerY >= 0 && centerY < Constants::N) {
-                    const float centerData = lattice_d[centerIndex].x;
-                    float left = centerData;
-                    float right = centerData;
-                    float top = centerData;
-                    float bot = centerData;
-                    if (centerX - 1 >= 0) {
-                        left = lattice_d[centerIndex - 1].x;
+                float posX[4] = { posXr.x,posXr.z,posXr.y,posXr.w };
+                float posY[4] = { posYr.x,posYr.z,posYr.y,posYr.w };
+                float vxr[4] = { posVXr.x, posVXr.z, posVXr.y, posVXr.w};
+                float vyr[4] = { posVYr.x, posVYr.z, posVYr.y, posVYr.w };
+                #pragma unroll 4
+                for (int m = 0; m < 4; m++) {
+                    // Sampling
+                    const int centerX = int(posX[m]);
+                    const int centerY = int(posY[m]);
+                    const int centerIndex = centerX + centerY * Constants::N;
+                    if (centerX >= 0 && centerX < Constants::N && centerY >= 0 && centerY < Constants::N) {
+                        const float centerData = __ldg(&lattice_d[centerIndex].x);
+                        float left = centerData;
+                        float right = centerData;
+                        float top = centerData;
+                        float bot = centerData;
+                        if (centerX - 1 >= 0) {
+                            left = __ldg(&lattice_d[centerIndex - 1].x);
+                        }
+                        if (centerX + 1 < Constants::N) {
+                            right = __ldg(&lattice_d[centerIndex + 1].x);
+                        }
+                        if (centerY - 1 >= 0) {
+                            top = __ldg(&lattice_d[centerIndex - Constants::N].x);
+                        }
+                        if (centerY + 1 < Constants::N) {
+                            bot = __ldg(&lattice_d[centerIndex + Constants::N].x);
+                        }
+                        const float forceComponentX = (right - left) * 0.5f;
+                        const float forceComponentY = (bot - top) * 0.5f;
+                        constexpr float dt = 0.002f;
+                        posX[m] = posX[m] + vxr[m] * dt;
+                        posY[m] = posY[m] + vyr[m] * dt;
+                        vxr[m] += forceComponentX * dt;
+                        vyr[m] += forceComponentY * dt;
                     }
-                    if (centerX + 1 < Constants::N) {
-                        right = lattice_d[centerIndex + 1].x;
-                    }
-                    if (centerY - 1 >= 0) {
-                        top = lattice_d[centerIndex - Constants::N].x;
-                    }
-                    if (centerY + 1 < Constants::N) {
-                        bot = lattice_d[centerIndex + Constants::N].x;
-                    }
-                    const float forceComponentX = (right - left) * 0.5f;
-                    const float forceComponentY = (bot - top) * 0.5f;
-                    constexpr float dt = 0.002f;
-                    x[index] += vx[index] * dt;
-                    y[index] += vy[index] * dt;
-                    vx[index] += forceComponentX * dt;
-                    vy[index] += forceComponentY * dt;
                 }
+                *reinterpret_cast<float4*>(&x[index*4]) = make_float4(posX[0], posX[1], posX[2], posX[3]);
+                *reinterpret_cast<float4*>(&y[index * 4]) = make_float4(posY[0], posY[1], posY[2], posY[3]);
+                *reinterpret_cast<float4*>(&vx[index * 4]) = make_float4(vxr[0], vxr[1], vxr[2], vxr[3]);
+                *reinterpret_cast<float4*>(&vy[index * 4]) = make_float4(vyr[0], vyr[1], vyr[2], vyr[3]);
             }
         }
     }
@@ -536,7 +551,7 @@ struct Universe {
     void startBenchmark() {
         gpuErrchk(cudaEventRecord(eventStart));
     }
-    // todo: scatter on 9 cells per mass
+    // todo: scatter on 9 cells per mass to improve accuracy more.
     void scatterMassOnLattice() {
         Kernels::k_clearLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
         Kernels::k_scatterMassOnLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, x_d, y_d, numParticles);
@@ -599,7 +614,6 @@ struct Universe {
         cv::resize(mat, resized, cv::Size(1280, 1280), 0, 0, cv::INTER_LINEAR);
 
         cv::imshow("Fast Nbody", resized);
-        cv::waitKey(1);
     }
     ~Universe() {
         cv::destroyAllWindows();
