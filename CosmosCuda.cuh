@@ -3,7 +3,25 @@
 #include <math.h>
 #include <vector>
 #include <iostream>
+#include <thread>
 #include <cuda_runtime.h>
+#ifndef PARALLEL_FOR
+#define PARALLEL_FOR(N,O) \
+                        struct LocalClass                                                           \
+                        {                                                                           \
+                            void operator()(int i) const O                                      \
+                        } f;                                                                        \
+                        std::thread threads[N];                                                     \
+                        for(int loopCounterI=0; loopCounterI<N; loopCounterI++)                     \
+                        {                                                                           \
+                            threads[loopCounterI]=std::thread(f,loopCounterI);                      \
+                        }                                                                           \
+                        for(int loopCounterI=0; loopCounterI<N; loopCounterI++)                     \
+                        {                                                                           \
+                            threads[loopCounterI].join();                                           \
+                        }                                                                           \
+
+#endif
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort = true)
 {
@@ -63,10 +81,8 @@ namespace Kernels {
         for (int level = 1; level <= 16; level <<= 1)
         {
             const int level2 = level * 2;
-            const int leveld2 = level / 2;
             const int idx = (warpLane % level2);
             const bool firstHalf = idx < level;
-            const float index = idx;
             const Constants::ComplexVar gather = makeComplexVar(__shfl_xor_sync(0xFFFFFFFF, var.x, level), __shfl_xor_sync(0xFFFFFFFF, var.y, level));
             const Constants::ComplexVar select1 = firstHalf ? var : gather;
             const Constants::ComplexVar select2 = firstHalf ? gather : var;
@@ -120,7 +136,6 @@ namespace Kernels {
 #pragma unroll
                 for (int blc = 0; blc < blockSteps; blc++) {
                     const unsigned int col = blc * Constants::THREADS + thread;
-                    Constants::ComplexVar var;
                     if (col < Constants::N) {
                         vars[blc] = s_coalescing[__brev(col) >> (32 - d_bits<Constants::N>())];
                     }
@@ -132,25 +147,22 @@ namespace Kernels {
 #pragma unroll
                 for (int blc = 0; blc < blockSteps; blc++) {
                     const unsigned int col = blc * Constants::THREADS + thread;
-                    const int element = col + row * Constants::N;
                     if (col < Constants::N) {
                         s_coalescing[col] = vars[blc];
                     }
                 }
                 __syncthreads();
-                int x = 0;
+              
                 int wOfs = 62;
 #pragma unroll 1
                 for (unsigned int level = 32; level < Constants::N; level <<= 1) {
                     const int level2 = level * 2;
-                    const int leveld2 = level / 2;
 #pragma unroll
                     for (int blc = 0; blc < blockSteps; blc++) {
                         const unsigned int col = blc * Constants::THREADS + thread;
                         if (col < Constants::N) {
                             const int idx = (col % level2);
                             const bool firstHalf = idx < level;
-                            const float index = idx;
                             const Constants::ComplexVar gather = s_coalescing[col ^ level];
                             const Constants::ComplexVar select1 = firstHalf ? vars[blc] : gather;
                             const Constants::ComplexVar select2 = firstHalf ? gather : vars[blc];
@@ -220,8 +232,8 @@ namespace Kernels {
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
         const int numThreads = blockDim.x;
-        const int globalThread = thread + block * numThreads;
-        const int numTotalThreads = numThreads * numBlocks;
+
+
         const int steps = (PAIR_LIST_SIZE + numBlocks - 1) / numBlocks;
         __shared__ Constants::ComplexVar s_tile[SUB_MATRIX_SIZE][SUB_MATRIX_SIZE + 1];
         __shared__ Constants::ComplexVar s_tile2[SUB_MATRIX_SIZE][SUB_MATRIX_SIZE + 1];
@@ -268,8 +280,7 @@ namespace Kernels {
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
         const int numThreads = blockDim.x;
-        const int globalThread = thread + block * numThreads;
-        const int numTotalThreads = numThreads * numBlocks;
+
         const int steps = (NUM_SUB_MATRICES_PER_DIMENSION + numBlocks - 1) / numBlocks;
         __shared__ Constants::ComplexVar s_tile[SUB_MATRIX_SIZE][SUB_MATRIX_SIZE + 1];
         for (int ii = 0; ii < steps; ii++) {
@@ -366,6 +377,7 @@ namespace Kernels {
         const int numThreads = blockDim.x;
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
+        
         // 4-wide coarsening for the memory bottleneck.
         // todo: use smem tiling for lattice re-use
         const int steps = (numParticles/4 + numTotalThreads - 1) / numTotalThreads;
@@ -458,7 +470,7 @@ namespace Kernels {
         }
     }
     template<int N>
-    __global__ void k_scatterMassOnLattice(Constants::ComplexVar* lattice_d, const float* x, const float* y, const int numParticles) {
+    __global__ void k_scatterMassOnLattice(Constants::ComplexVar* lattice_d, const float* x, const float* y, const int numParticles, const float* renderColor_d, bool colorOnly = false) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -472,7 +484,9 @@ namespace Kernels {
                 const int xi = x[index];
                 const int yi = y[index];
                 if (xi >= 0 && xi < Constants::N && yi >= 0 && yi < Constants::N) {
-                    atomicAdd(&lattice_d[xi + yi * Constants::N].x, 1.0f);
+                    // 1.0 -> mass
+                    // renderColor -> only for rendering
+                    atomicAdd(&lattice_d[xi + yi * Constants::N].x, colorOnly ? renderColor_d[index] : 1.0f);
                 }
             }
         }
@@ -484,8 +498,7 @@ struct Universe {
     std::vector<float> x, y;
     std::vector<float> vx, vy;
     std::vector<Constants::ComplexVar> lattice;
-    std::vector<int> renderIndices;
-
+    std::vector<float> renderColor;
 
     // For OpenCV
     cv::Mat mat;
@@ -502,6 +515,7 @@ struct Universe {
     float* y_d;
     float* vx_d;
     float* vy_d;
+    float* renderColor_d;
     Universe(int particles = 0, int tileSizeParameter = 32) {
         cudaSetDevice(0);
         tileSize = tileSizeParameter;
@@ -510,22 +524,25 @@ struct Universe {
         vx.resize(particles);
         y.resize(particles);
         vy.resize(particles);
-
+        renderColor.resize(particles);
         lattice.resize(Constants::N * Constants::N);
         mat = cv::Mat(cv::Size2i(Constants::N, Constants::N), CV_32FC1);
         const int centerX = Constants::N / 2;
         const int centerY = Constants::N / 2;
-        const float speed = 1.50f;
+        const float speed = 1.50f * ( numParticles > 10000000 ? sqrt(numParticles / 10000000.0) : 1.0);
         for (int i = 0; i < particles; i++) {
             const float r = rand() % (Constants::N / 3);
             const float a = Constants::MATH_PI * 2.0 * (rand() % 1000) / 1000.0f;
+            // orbit position
             x[i] = r * cos(a) + Constants::N / 2;
             y[i] = r * sin(a) + Constants::N / 2;
             const float vecX = x[i] - centerX;
             const float vecY = y[i] - centerY;
-
+            // orbit velocity
             vx[i] = vecY * speed / (sqrt(sqrt(r)) + 1.0f);
             vy[i] = -vecX * speed / (sqrt(sqrt(r)) + 1.0f);
+            // random color
+            renderColor[i] = 0.2f + ((rand() % 800) / 1000.0f);
         }
         gpuErrchk(cudaEventCreate(&eventStart));
         gpuErrchk(cudaEventCreate(&eventStop));
@@ -536,10 +553,12 @@ struct Universe {
         gpuErrchk(cudaMalloc(&y_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMalloc(&vx_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMalloc(&vy_d, sizeof(float) * numParticles));
+        gpuErrchk(cudaMalloc(&renderColor_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMemcpy(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(vx_d, vx.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(vy_d, vy.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(renderColor_d, renderColor.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         cudaFuncSetAttribute(Kernels::k_calcFftBatched1D<Constants::N>, cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxShared);
         cudaFuncSetAttribute(Kernels::k_calcFftBatched1D<Constants::N>, cudaFuncAttributeMaxDynamicSharedMemorySize, Constants::N * sizeof(Constants::ComplexVar));
         Kernels::k_fillCoefficientArray<Constants::N> << <1, 1024 >> > ();
@@ -552,9 +571,9 @@ struct Universe {
         gpuErrchk(cudaEventRecord(eventStart));
     }
     // todo: scatter on 9 cells per mass to improve accuracy more.
-    void scatterMassOnLattice() {
+    void scatterMassOnLattice(bool renderOnly = false) {
         Kernels::k_clearLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
-        Kernels::k_scatterMassOnLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, x_d, y_d, numParticles);
+        Kernels::k_scatterMassOnLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, x_d, y_d, numParticles, renderColor_d, renderOnly);
 
     }
     void calcLatticeFft2D() {
@@ -601,15 +620,28 @@ struct Universe {
     }
 
     void render() {
-        scatterMassOnLattice();
+        scatterMassOnLattice(true);
         gpuErrchk(cudaDeviceSynchronize());
         mat.setTo(cv::Scalar(0.0f));
 
-
         gpuErrchk(cudaMemcpy(lattice.data(), lattice_d, sizeof(Constants::ComplexVar) * Constants::N * Constants::N, cudaMemcpyDeviceToHost));
-        for (int i = 0; i < Constants::N * Constants::N; i++) {
-            mat.at<float>(i) = lattice[i].x;
+        std::vector<std::thread> renderThread;
+        const int nThr = 16;
+        for (int i = 0; i < nThr; i++) {
+            const int iClone = i;
+            renderThread.emplace_back([&, iClone]() {
+                const int chunkSize = (Constants::N * Constants::N) / nThr;
+                for (int j = iClone * chunkSize; j < iClone * chunkSize + chunkSize; j++) {
+                    const auto data = lattice[j].x;
+                    mat.at<float>(j) = (data > 1.0f ? 1.0f : data);
+                }
+            });
         }
+        for (int i = 0; i < 16; i++) {
+            renderThread[i].join();
+        }
+
+
         cv::Mat resized;
         cv::resize(mat, resized, cv::Size(1280, 1280), 0, 0, cv::INTER_LINEAR);
 
@@ -624,6 +656,7 @@ struct Universe {
         gpuErrchk(cudaFree(y_d));
         gpuErrchk(cudaFree(vx_d));
         gpuErrchk(cudaFree(vy_d));
+        gpuErrchk(cudaFree(renderColor_d));
         gpuErrchk(cudaEventDestroy(eventStart));
         gpuErrchk(cudaEventDestroy(eventStop));
     }

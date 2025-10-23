@@ -3,7 +3,7 @@
 int main() {
     const int numNbodySimulationsPerRender = 5;
     srand(time(0));
-    Universe uni(10000000);
+    Universe uni(1000 * 1000 * 100);
     uni.calcFilterFft2D();
     while (true) {
         uni.startBenchmark();
