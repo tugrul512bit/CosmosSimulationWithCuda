@@ -41,12 +41,12 @@ inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort =
 }
 
 namespace Constants {
-    // Constants::N can be only power of 2. The higher Constants::N, the better approximation. For full accuracy, it needs a truncated filter lattice + closest-neighbor search algorithm (for scientific work).
-    constexpr int N = 2048;
-    // RTX4070 specs (1536 resident threads per SM, 46 SMs)
+    // CUDA grid and block sizes. (currently tuned for RTX4070)
     constexpr int BLOCKS = 46 * 3;
     constexpr int THREADS = 512;
     // FFT uses these
+    // N is width of lattice (N x N) and can be only a power of 2. Higher value increases accuracy. For full accuracy, it needs a truncated filter lattice + closest-neighbor search algorithm (for scientific work, which also requires interpolation between cells of lattice).
+    constexpr int N = 2048;
     constexpr double MATH_PI = 3.14159265358979323846;
     using ComplexVar = float2;
 }
@@ -430,8 +430,7 @@ namespace Kernels {
             }
         }
     }
-    // todo: per-lattice-cell sampling reduction --> kernel 1
-    //       particle single access to reduced data --> kernel 2
+
     template<int N>
     __global__ void k_forceMultiSampling(const float2* const __restrict__ latticeForceXY_d, float* const __restrict__ x, float* const __restrict__ y, float* const __restrict__ vx, float* const __restrict__ vy, const int numParticles) {
         const int thread = threadIdx.x;
@@ -554,6 +553,7 @@ namespace Kernels {
             }
         }
     }
+
     template<int N>
     __global__ void k_scatterMassOnLatticeForRender(float* lattice_d, const float* x, const float* y, const int numParticles, const float* renderColor_d, bool colorOnly = false) {
         const int thread = threadIdx.x;
