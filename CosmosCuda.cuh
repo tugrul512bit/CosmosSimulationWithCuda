@@ -378,7 +378,7 @@ namespace Kernels {
         }
     }
     template<int N>
-    __global__ void k_calcGradientLattice(const float* const __restrict__ lattice_d, float* const __restrict__ latticeForceX_d, float* const __restrict__ latticeForceY_d) {
+    __global__ void k_calcGradientLattice(const float* const __restrict__ lattice_d, float2* const __restrict__ latticeForceXY_d) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -411,15 +411,14 @@ namespace Kernels {
                 // Gradient
                 const float forceComponentX = (right - left) * 0.5f;
                 const float forceComponentY = (bot - top) * 0.5f;
-                latticeForceX_d[index] = forceComponentX;
-                latticeForceY_d[index] = forceComponentY;
+                latticeForceXY_d[index] = make_float2(forceComponentX, forceComponentY);
             }
         }
     }
     // todo: per-lattice-cell sampling reduction --> kernel 1
     //       particle single access to reduced data --> kernel 2
     template<int N>
-    __global__ void k_forceMultiSampling(const float* const __restrict__ latticeForceX_d, const float* const __restrict__ latticeForceY_d, float* const __restrict__ x, float* const __restrict__ y, float* const __restrict__ vx, float* const __restrict__ vy, const int numParticles) {
+    __global__ void k_forceMultiSampling(const float2* const __restrict__ latticeForceXY_d, float* const __restrict__ x, float* const __restrict__ y, float* const __restrict__ vx, float* const __restrict__ vy, const int numParticles) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -430,7 +429,7 @@ namespace Kernels {
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < numParticles / 4) {
-                
+                // Particle data is not expected to fit L2/L3 cache.
                 const float4 posXr = __ldcs(reinterpret_cast<float4*>(&x[index * 4]));
                 const float4 posYr = __ldcs(reinterpret_cast<float4*>(&y[index * 4]));
                 const float4 posVXr = __ldcs(reinterpret_cast<float4*>(&vx[index * 4]));
@@ -442,20 +441,17 @@ namespace Kernels {
                 float vyr[4] = { posVYr.x, posVYr.z, posVYr.y, posVYr.w };
 #pragma unroll 4
                 for (int m = 0; m < 4; m++) {
-                    // Sampling
                     const int centerX = int(posX[m]);
                     const int centerY = int(posY[m]);
                     const int centerIndex = centerX + centerY * Constants::N;
                     if (centerX >= 0 && centerX < Constants::N && centerY >= 0 && centerY < Constants::N) {
-
-                        // Gradient
-                        const float forceComponentX = __ldg(&latticeForceX_d[centerX + centerY * N]);
-                        const float forceComponentY = __ldg(&latticeForceY_d[centerX + centerY * N]);
+                        // Getting precalculated gradient. This should benefit from caching when many particles access same point.
+                        const float2 forceComponents = __ldg(&latticeForceXY_d[centerIndex]);
                         constexpr float dt = 0.002f;
                         posX[m] = fmaf(vxr[m], dt, posX[m]);
                         posY[m] = fmaf(vyr[m], dt, posY[m]);
-                        vxr[m] = fmaf(forceComponentX, dt, vxr[m]);
-                        vyr[m] = fmaf(forceComponentY, dt, vyr[m]);
+                        vxr[m] = fmaf(forceComponents.x, dt, vxr[m]);
+                        vyr[m] = fmaf(forceComponents.y, dt, vyr[m]);
                     }
                 }
                 __stcs(reinterpret_cast<float4*>(&x[index * 4]), make_float4(posX[0], posX[1], posX[2], posX[3]));
@@ -578,8 +574,7 @@ private:
     cudaEvent_t eventStop;
     Constants::ComplexVar* lattice_d;
     float* latticeShifted_d;
-    float* latticeShiftedForceX_d;
-    float* latticeShiftedForceY_d;
+    float2* latticeShiftedForceXY_d;
     Constants::ComplexVar* filter_d;
     
     float* x_d;
@@ -620,8 +615,7 @@ public:
         gpuErrchk(cudaEventCreate(&eventStop));
         gpuErrchk(cudaMalloc(&lattice_d, sizeof(Constants::ComplexVar) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&latticeShifted_d, sizeof(float) * Constants::N * Constants::N));
-        gpuErrchk(cudaMalloc(&latticeShiftedForceX_d, sizeof(float) * Constants::N * Constants::N));
-        gpuErrchk(cudaMalloc(&latticeShiftedForceY_d, sizeof(float) * Constants::N * Constants::N));
+        gpuErrchk(cudaMalloc(&latticeShiftedForceXY_d, sizeof(float2) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&filter_d, sizeof(Constants::ComplexVar) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&x_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMalloc(&y_d, sizeof(float) * numParticles));
@@ -701,8 +695,8 @@ private:
     }
     void multiSampleForces() {
         Kernels::k_shiftLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, latticeShifted_d);
-        Kernels::k_calcGradientLattice<Constants::N> <<<Constants::BLOCKS, Constants::THREADS >>> (latticeShifted_d, latticeShiftedForceX_d, latticeShiftedForceY_d);
-        Kernels::k_forceMultiSampling<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (latticeShiftedForceX_d, latticeShiftedForceY_d, x_d, y_d, vx_d, vy_d, numParticles);
+        Kernels::k_calcGradientLattice<Constants::N> <<<Constants::BLOCKS, Constants::THREADS >>> (latticeShifted_d, latticeShiftedForceXY_d);
+        Kernels::k_forceMultiSampling<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (latticeShiftedForceXY_d, x_d, y_d, vx_d, vy_d, numParticles);
     }
     public:
     void nBody() {
@@ -751,8 +745,7 @@ private:
         cv::destroyAllWindows();
         gpuErrchk(cudaFree(lattice_d));
         gpuErrchk(cudaFree(latticeShifted_d));
-        gpuErrchk(cudaFree(latticeShiftedForceX_d));
-        gpuErrchk(cudaFree(latticeShiftedForceY_d));
+        gpuErrchk(cudaFree(latticeShiftedForceXY_d));
         gpuErrchk(cudaFree(filter_d));
         gpuErrchk(cudaFree(x_d));
         gpuErrchk(cudaFree(y_d));
