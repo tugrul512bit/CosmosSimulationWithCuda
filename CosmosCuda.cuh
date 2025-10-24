@@ -432,7 +432,7 @@ namespace Kernels {
     }
 
     template<int N>
-    __global__ void k_forceMultiSampling(const float2* const __restrict__ latticeForceXY_d, float* const __restrict__ x, float* const __restrict__ y, float* const __restrict__ vx, float* const __restrict__ vy, float* const __restrict__ m, const int numParticles) {
+    __global__ void k_forceMultiSampling(const float2* const __restrict__ latticeForceXY_d, float* const __restrict__ x, float* const __restrict__ y, float* const __restrict__ vx, float* const __restrict__ vy, float* const __restrict__ m, const int numParticles, const bool accuracy) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -460,14 +460,40 @@ namespace Kernels {
                     const int centerY = int(posY[m]);
                     const float inverseMass = 1.0f / mass[m];
                     const int centerIndex = centerX + centerY * Constants::N;
-                    if (centerX >= 0 && centerX < Constants::N && centerY >= 0 && centerY < Constants::N) {
+                    if (centerX >= 1 && centerX < Constants::N - 1 && centerY >= 1 && centerY < Constants::N - 1) {
                         // Getting precalculated gradient. This should benefit from caching when many particles access same point.
-                        const float2 forceComponents = __ldca(&latticeForceXY_d[centerIndex]);
-                        constexpr float dt = 0.002f;
-                        posX[m] = fmaf(vxr[m], dt, posX[m]);
-                        posY[m] = fmaf(vyr[m], dt, posY[m]);
-                        vxr[m] = fmaf(forceComponents.x * inverseMass, dt, vxr[m]);
-                        vyr[m] = fmaf(forceComponents.y * inverseMass, dt, vyr[m]);
+                        // Then calculating interpolation for a more accurate behavior.
+                        if (accuracy) {
+                            const float2 forceComponentsCurrent = __ldca(&latticeForceXY_d[centerIndex]);
+                            const float2 forceComponentsRight = __ldca(&latticeForceXY_d[centerIndex + 1]);
+                            const float2 forceComponentsBottom = __ldca(&latticeForceXY_d[centerIndex + Constants::N]);
+                            const float2 forceComponentsBottomRight = __ldca(&latticeForceXY_d[centerIndex + 1 + Constants::N]);
+                            const float fractionalX = posX[m] - centerX;
+                            const float fractionalY = posY[m] - centerY;
+                            const float xDiff1 = 1.0f - fractionalX;
+                            const float yDiff1 = 1.0f - fractionalY;
+                            const float xComponent = forceComponentsCurrent.x * xDiff1 * yDiff1 +
+                                forceComponentsRight.x * fractionalX * yDiff1 +
+                                forceComponentsBottom.x * xDiff1 * fractionalY +
+                                forceComponentsBottomRight.x * fractionalX * fractionalY;
+                            const float yComponent = forceComponentsCurrent.y * xDiff1 * yDiff1 +
+                                forceComponentsRight.y * fractionalX * yDiff1 +
+                                forceComponentsBottom.y * xDiff1 * fractionalY +
+                                forceComponentsBottomRight.y * fractionalX * fractionalY;
+                            constexpr float dt = 0.002f;
+                            posX[m] = fmaf(vxr[m], dt, posX[m]);
+                            posY[m] = fmaf(vyr[m], dt, posY[m]);
+                            vxr[m] = fmaf(xComponent * inverseMass, dt, vxr[m]);
+                            vyr[m] = fmaf(yComponent * inverseMass, dt, vyr[m]);
+                        }
+                        else {
+                            const float2 forceComponentsCurrent = __ldca(&latticeForceXY_d[centerIndex]);
+                            constexpr float dt = 0.002f;
+                            posX[m] = fmaf(vxr[m], dt, posX[m]);
+                            posY[m] = fmaf(vyr[m], dt, posY[m]);
+                            vxr[m] = fmaf(forceComponentsCurrent.x * inverseMass, dt, vxr[m]);
+                            vyr[m] = fmaf(forceComponentsCurrent.y * inverseMass, dt, vyr[m]);
+                        }
                     }
                 }
                 __stcs(reinterpret_cast<float4*>(&x[index * 4]), make_float4(posX[0], posX[1], posX[2], posX[3]));
@@ -535,7 +561,7 @@ namespace Kernels {
         }
     }
     template<int N>
-    __global__ void k_scatterMassOnLattice(Constants::ComplexVar* lattice_d, const float* x, const float* y, const float* m, const int numParticles) {
+    __global__ void k_scatterMassOnLattice(Constants::ComplexVar* lattice_d, const float* x, const float* y, const float* m, const int numParticles, bool accuracy) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -547,11 +573,29 @@ namespace Kernels {
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < numParticles) {
-                const int xi = __ldcs(&x[index]);
-                const int yi = __ldcs(&y[index]);
-                if (xi >= 0 && xi < Constants::N && yi >= 0 && yi < Constants::N) {
-                    // All particles have 1.0 mass.
-                    atomicAdd(&lattice_d[xi + yi * Constants::N].x, __ldcs(&m[index]));
+                const float xf = __ldcs(&x[index]);
+                const float yf = __ldcs(&y[index]);
+                const float mass = __ldcs(&m[index]);
+                const int xi = xf;
+                const int yi = yf;
+                if (xi >= 1 && xi < Constants::N - 1 && yi >= 1 && yi < Constants::N - 1) {
+                    const float fractionalX = xf - xi;
+                    const float fractionalY = yf - yi;
+                    const float xDiff1 = 1.0f - fractionalX;
+                    const float yDiff1 = 1.0f - fractionalY;
+                    const float weightCurrent = xDiff1 * yDiff1;
+                    const float weightRight = fractionalX * yDiff1;
+                    const float weightBottom = xDiff1 * fractionalY;
+                    const float weightBottomRight = fractionalX * fractionalY;
+                    // Optional weighted scattering for more accuracy.
+                    if (accuracy) {
+                        atomicAdd(&lattice_d[xi + yi * Constants::N].x, weightCurrent * mass);
+                        atomicAdd(&lattice_d[1 + xi + yi * Constants::N].x, weightRight * mass);
+                        atomicAdd(&lattice_d[xi + (yi + 1) * Constants::N].x, weightBottom * mass);
+                        atomicAdd(&lattice_d[1 + xi + (yi + 1) * Constants::N].x, weightBottomRight * mass);
+                    } else {
+                        atomicAdd(&lattice_d[xi + yi * Constants::N].x, mass);
+                    }
                 }
             }
         }
@@ -600,15 +644,23 @@ private:
     float* latticeShifted_d;
     float2* latticeShiftedForceXY_d;
     Constants::ComplexVar* filter_d;
-    
     float* x_d;
     float* y_d;
     float* vx_d;
     float* vy_d;
     float* m_d;
     float* renderColor_d;
+
+    // Accuracy setting: increases accuracy of mass projections and force sampling at cost of 50% performance
+    bool accuracy;
+    // Window stats
+    int ww;
+    int wh;
 public:
-    Universe(int particles = 0, int cudaDevice = 0) {
+    Universe(int particles, int cudaDevice, bool lowAccuracy, int windowWidthPixels, int windowHeightPixels) {
+        ww = windowWidthPixels;
+        wh = windowHeightPixels;
+        accuracy = !lowAccuracy;
         cudaSetDevice(cudaDevice);
         srand(time(0));
         numParticles = particles;
@@ -622,9 +674,9 @@ public:
         mat = cv::Mat(cv::Size2i(Constants::N, Constants::N), CV_32FC1);
         const int centerX = Constants::N / 2;
         const int centerY = Constants::N / 2;
-        const float speed = 20.0f * ( numParticles > 10000000 ? sqrt(numParticles / 10000000.0) : 1.0);
+        const float speed = 0.1f * ( numParticles > 10000000 ? sqrt(numParticles / 10000000.0) : 1.0);
         for (int i = 0; i < particles; i++) {
-            const float r = 30 + (rand() % (Constants::N / 3));
+            const float r = 20 + (rand() % (Constants::N / 3));
             const float a = Constants::MATH_PI * 2.0 * (rand() % 1000) / 1000.0f;
             // orbit position
             x[i] = r * cos(a) + Constants::N / 2;
@@ -632,8 +684,8 @@ public:
             const float vecX = x[i] - centerX;
             const float vecY = y[i] - centerY;
             // orbit velocity
-            vx[i] = vecY * speed / pow(r + 1.0f, 0.9);
-            vy[i] = -vecX * speed / pow(r + 1.0f, 0.9);
+            vx[i] = vecY * speed;
+            vy[i] = -vecX * speed;
             // random color
             renderColor[i] = 0.2f + ((rand() % 800) / 1000.0f);
             m[i] = 1.0f;
@@ -697,7 +749,7 @@ private:
         }
         else {
             Kernels::k_clearLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
-            Kernels::k_scatterMassOnLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, x_d, y_d, m_d, numParticles);
+            Kernels::k_scatterMassOnLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, x_d, y_d, m_d, numParticles, accuracy);
         }
 
 
@@ -734,7 +786,7 @@ private:
     void multiSampleForces() {
         Kernels::k_shiftLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, latticeShifted_d);
         Kernels::k_calcGradientLattice<Constants::N> <<<Constants::BLOCKS, Constants::THREADS >>> (latticeShifted_d, latticeShiftedForceXY_d);
-        Kernels::k_forceMultiSampling<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (latticeShiftedForceXY_d, x_d, y_d, vx_d, vy_d, m_d, numParticles);
+        Kernels::k_forceMultiSampling<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (latticeShiftedForceXY_d, x_d, y_d, vx_d, vy_d, m_d, numParticles, accuracy);
     }
     public:
     void nBody() {
@@ -776,7 +828,7 @@ private:
             renderThread[i].join();
         }
         cv::Mat resized;
-        cv::resize(mat, resized, cv::Size(1380, 1380), 0, 0, cv::INTER_LINEAR);
+        cv::resize(mat, resized, cv::Size(ww, wh), 0, 0, cv::INTER_LINEAR);
         cv::imshow("Fast Nbody", resized);
     }
     ~Universe() {

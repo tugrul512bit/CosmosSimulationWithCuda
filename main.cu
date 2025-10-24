@@ -6,9 +6,16 @@
 // Constants::N
 int main() {
     const int numNbodySimulationsPerRender = 2;
+    // 20 Bytes per particle is allocated.
     const int numParticles = 1000 * 1000 * 10;
+    // cuda device index
     const int device = 0;
-    Universe cosmos(numParticles, device);
+    // true: more performance
+    const bool lowAccuracy = false;
+    // Window width/height
+    const int w = 1200;
+    const int h = 1200;
+    Universe cosmos(numParticles, device, lowAccuracy, w, h);
     
     while (true) {
         cosmos.startBenchmark();
