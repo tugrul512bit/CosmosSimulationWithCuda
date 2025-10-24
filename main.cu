@@ -9,7 +9,7 @@ int main() {
     const int numParticles = 1000 * 1000 * 10;
     const int device = 0;
     Universe cosmos(numParticles, device);
-
+    
     while (true) {
         cosmos.startBenchmark();
         for (int i = 0; i < numNbodySimulationsPerRender; i++) {

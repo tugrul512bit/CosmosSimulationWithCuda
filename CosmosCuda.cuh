@@ -377,7 +377,7 @@ namespace Kernels {
         }
     }
     template<int N>
-    __global__ void k_forceMultiSampling(const Constants::ComplexVar* const __restrict__ lattice_d, float* x, float* y, float* vx, float* vy, const int numParticles) {
+    __global__ void k_forceMultiSampling(const float* const __restrict__ lattice_d, float* const __restrict__ x, float* const __restrict__ y, float* const __restrict__ vx, float* const __restrict__ vy, const int numParticles) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -391,10 +391,10 @@ namespace Kernels {
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < numParticles/4) {
-                const float4 posXr = __ldg(reinterpret_cast<float4*>(&x[index * 4]));
-                const float4 posYr = __ldg(reinterpret_cast<float4*>(&y[index * 4]));
-                const float4 posVXr = __ldg(reinterpret_cast<float4*>(&vx[index * 4]));
-                const float4 posVYr = __ldg(reinterpret_cast<float4*>(&vy[index * 4]));
+                const float4 posXr = __ldcs(reinterpret_cast<float4*>(&x[index * 4]));
+                const float4 posYr = __ldcs(reinterpret_cast<float4*>(&y[index * 4]));
+                const float4 posVXr = __ldcs(reinterpret_cast<float4*>(&vx[index * 4]));
+                const float4 posVYr = __ldcs(reinterpret_cast<float4*>(&vy[index * 4]));
 
                 float posX[4] = { posXr.x,posXr.z,posXr.y,posXr.w };
                 float posY[4] = { posYr.x,posYr.z,posYr.y,posYr.w };
@@ -407,23 +407,24 @@ namespace Kernels {
                     const int centerY = int(posY[m]);
                     const int centerIndex = centerX + centerY * Constants::N;
                     if (centerX >= 0 && centerX < Constants::N && centerY >= 0 && centerY < Constants::N) {
-                        const float centerData = __ldg(&lattice_d[centerIndex].x);
+                        const float centerData = __ldg(&lattice_d[centerIndex]);
                         float left = centerData;
                         float right = centerData;
                         float top = centerData;
                         float bot = centerData;
                         if (centerX - 1 >= 0) {
-                            left = __ldg(&lattice_d[centerIndex - 1].x);
+                            left = __ldg(&lattice_d[centerIndex - 1]);
                         }
                         if (centerX + 1 < Constants::N) {
-                            right = __ldg(&lattice_d[centerIndex + 1].x);
+                            right = __ldg(&lattice_d[centerIndex + 1]);
                         }
                         if (centerY - 1 >= 0) {
-                            top = __ldg(&lattice_d[centerIndex - Constants::N].x);
+                            top = __ldg(&lattice_d[centerIndex - Constants::N]);
                         }
                         if (centerY + 1 < Constants::N) {
-                            bot = __ldg(&lattice_d[centerIndex + Constants::N].x);
+                            bot = __ldg(&lattice_d[centerIndex + Constants::N]);
                         }
+                        // Gradient
                         const float forceComponentX = (right - left) * 0.5f;
                         const float forceComponentY = (bot - top) * 0.5f;
                         constexpr float dt = 0.002f;
@@ -433,10 +434,10 @@ namespace Kernels {
                         vyr[m] += forceComponentY * dt;
                     }
                 }
-                *reinterpret_cast<float4*>(&x[index*4]) = make_float4(posX[0], posX[1], posX[2], posX[3]);
-                *reinterpret_cast<float4*>(&y[index * 4]) = make_float4(posY[0], posY[1], posY[2], posY[3]);
-                *reinterpret_cast<float4*>(&vx[index * 4]) = make_float4(vxr[0], vxr[1], vxr[2], vxr[3]);
-                *reinterpret_cast<float4*>(&vy[index * 4]) = make_float4(vyr[0], vyr[1], vyr[2], vyr[3]);
+                __stcs(reinterpret_cast<float4*>(&x[index*4]), make_float4(posX[0], posX[1], posX[2], posX[3]));
+                __stcs(reinterpret_cast<float4*>(&y[index * 4]), make_float4(posY[0], posY[1], posY[2], posY[3]));
+                __stcs(reinterpret_cast<float4*>(&vx[index * 4]), make_float4(vxr[0], vxr[1], vxr[2], vxr[3]));
+                __stcs(reinterpret_cast<float4*>(&vy[index * 4]), make_float4(vyr[0], vyr[1], vyr[2], vyr[3]));
             }
         }
     }
@@ -457,7 +458,23 @@ namespace Kernels {
         }
     }
     template<int N>
-    __global__ void k_shiftLattice(Constants::ComplexVar* lattice_d, Constants::ComplexVar* latticeShifted_d) {
+    __global__ void k_clearLatticeForRender(float* lattice_d) {
+        const int thread = threadIdx.x;
+        const int block = blockIdx.x;
+        const int numBlocks = gridDim.x;
+        const int numThreads = blockDim.x;
+        const int globalThread = thread + block * numThreads;
+        const int numTotalThreads = numThreads * numBlocks;
+        const int steps = (Constants::N * Constants::N + numTotalThreads - 1) / numTotalThreads;
+        for (int ii = 0; ii < steps; ii++) {
+            const int index = ii * numTotalThreads + globalThread;
+            if (index < Constants::N * Constants::N) {
+                lattice_d[index] = 0.0f;
+            }
+        }
+    }
+    template<int N>
+    __global__ void k_shiftLattice(Constants::ComplexVar* lattice_d, float* latticeShifted_d) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -472,12 +489,12 @@ namespace Kernels {
                 const int y = index / Constants::N;
                 const int shiftedX = (x - Constants::N / 2 + Constants::N * 2) % Constants::N;
                 const int shiftedY = (y - Constants::N / 2 + Constants::N * 2) % Constants::N;
-                latticeShifted_d[index] = lattice_d[shiftedX + shiftedY * Constants::N];
+                latticeShifted_d[index] = lattice_d[shiftedX + shiftedY * Constants::N].x;
             }
         }
     }
     template<int N>
-    __global__ void k_scatterMassOnLattice(Constants::ComplexVar* lattice_d, const float* x, const float* y, const int numParticles, const float* renderColor_d, bool colorOnly = false) {
+    __global__ void k_scatterMassOnLattice(Constants::ComplexVar* lattice_d, const float* x, const float* y, const int numParticles) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -491,9 +508,27 @@ namespace Kernels {
                 const int xi = x[index];
                 const int yi = y[index];
                 if (xi >= 0 && xi < Constants::N && yi >= 0 && yi < Constants::N) {
-                    // 1.0 -> mass
-                    // renderColor -> only for rendering
-                    atomicAdd(&lattice_d[xi + yi * Constants::N].x, colorOnly ? renderColor_d[index] : 1.0f);
+                    atomicAdd(&lattice_d[xi + yi * Constants::N].x, 1.0f);
+                }
+            }
+        }
+    }
+    template<int N>
+    __global__ void k_scatterMassOnLatticeForRender(float* lattice_d, const float* x, const float* y, const int numParticles, const float* renderColor_d, bool colorOnly = false) {
+        const int thread = threadIdx.x;
+        const int block = blockIdx.x;
+        const int numBlocks = gridDim.x;
+        const int numThreads = blockDim.x;
+        const int globalThread = thread + block * numThreads;
+        const int numTotalThreads = numThreads * numBlocks;
+        const int steps = (numParticles + numTotalThreads - 1) / numTotalThreads;
+        for (int ii = 0; ii < steps; ii++) {
+            const int index = ii * numTotalThreads + globalThread;
+            if (index < numParticles) {
+                const int xi = x[index];
+                const int yi = y[index];
+                if (xi >= 0 && xi < Constants::N && yi >= 0 && yi < Constants::N) {
+                    atomicAdd(&lattice_d[xi + yi * Constants::N], renderColor_d[index]);
                 }
             }
         }
@@ -505,7 +540,7 @@ private:
     // For host
     std::vector<float> x, y;
     std::vector<float> vx, vy;
-    std::vector<Constants::ComplexVar> lattice;
+    std::vector<float> lattice;
     std::vector<float> renderColor;
 
     // For OpenCV
@@ -516,8 +551,9 @@ private:
     cudaEvent_t eventStart;
     cudaEvent_t eventStop;
     Constants::ComplexVar* lattice_d;
-    Constants::ComplexVar* latticeShifted_d;
+    float* latticeShifted_d;
     Constants::ComplexVar* filter_d;
+    
     float* x_d;
     float* y_d;
     float* vx_d;
@@ -555,7 +591,7 @@ public:
         gpuErrchk(cudaEventCreate(&eventStart));
         gpuErrchk(cudaEventCreate(&eventStop));
         gpuErrchk(cudaMalloc(&lattice_d, sizeof(Constants::ComplexVar) * Constants::N * Constants::N));
-        gpuErrchk(cudaMalloc(&latticeShifted_d, sizeof(Constants::ComplexVar) * Constants::N * Constants::N));
+        gpuErrchk(cudaMalloc(&latticeShifted_d, sizeof(float) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&filter_d, sizeof(Constants::ComplexVar) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&x_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMalloc(&y_d, sizeof(float) * numParticles));
@@ -593,8 +629,15 @@ public:
 private:
     // todo: scatter on 9 cells per mass to improve accuracy more.
     void scatterMassOnLattice(bool renderOnly = false) {
-        Kernels::k_clearLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
-        Kernels::k_scatterMassOnLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, x_d, y_d, numParticles, renderColor_d, renderOnly);
+        if (renderOnly) {
+            Kernels::k_clearLatticeForRender<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (latticeShifted_d);
+            Kernels::k_scatterMassOnLatticeForRender<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (latticeShifted_d, x_d, y_d, numParticles, renderColor_d, renderOnly);
+        }
+        else {
+            Kernels::k_clearLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
+            Kernels::k_scatterMassOnLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, x_d, y_d, numParticles);
+        }
+
 
     }
     void calcLatticeFft2D() {
@@ -653,7 +696,7 @@ private:
         gpuErrchk(cudaDeviceSynchronize());
         mat.setTo(cv::Scalar(0.0f));
 
-        gpuErrchk(cudaMemcpy(lattice.data(), lattice_d, sizeof(Constants::ComplexVar) * Constants::N * Constants::N, cudaMemcpyDeviceToHost));
+        gpuErrchk(cudaMemcpy(lattice.data(), latticeShifted_d, sizeof(float) * Constants::N * Constants::N, cudaMemcpyDeviceToHost));
         std::vector<std::thread> renderThread;
         const int nThr = 4;
         for (int i = 0; i < nThr; i++) {
@@ -661,7 +704,7 @@ private:
             renderThread.emplace_back([&, iClone]() {
                 const int chunkSize = (Constants::N * Constants::N) / nThr;
                 for (int j = iClone * chunkSize; j < iClone * chunkSize + chunkSize; j++) {
-                    const auto data = lattice[j].x;
+                    const auto data = lattice[j];
                     mat.at<float>(j) = (data > 1.0f ? 1.0f : data);
                 }
             });
