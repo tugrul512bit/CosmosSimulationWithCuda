@@ -432,7 +432,7 @@ namespace Kernels {
     }
 
     template<int N>
-    __global__ void k_forceMultiSampling(const float2* const __restrict__ latticeForceXY_d, float* const __restrict__ x, float* const __restrict__ y, float* const __restrict__ vx, float* const __restrict__ vy, const int numParticles) {
+    __global__ void k_forceMultiSampling(const float2* const __restrict__ latticeForceXY_d, float* const __restrict__ x, float* const __restrict__ y, float* const __restrict__ vx, float* const __restrict__ vy, float* const __restrict__ m, const int numParticles) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -448,14 +448,17 @@ namespace Kernels {
                 const float4 posYr = __ldcs(reinterpret_cast<float4*>(&y[index * 4]));
                 const float4 posVXr = __ldcs(reinterpret_cast<float4*>(&vx[index * 4]));
                 const float4 posVYr = __ldcs(reinterpret_cast<float4*>(&vy[index * 4]));
+                const float4 massData = __ldcs(reinterpret_cast<float4*>(&m[index * 4]));
                 float posX[4] = { posXr.x,posXr.y,posXr.z,posXr.w };
                 float posY[4] = { posYr.x,posYr.y,posYr.z,posYr.w };
                 float vxr[4] = { posVXr.x, posVXr.y, posVXr.z, posVXr.w };
                 float vyr[4] = { posVYr.x, posVYr.y, posVYr.z, posVYr.w };
+                float mass[4] = { massData.x, massData.y, massData.z, massData.w };
                 #pragma unroll 4
                 for (int m = 0; m < 4; m++) {
                     const int centerX = int(posX[m]);
                     const int centerY = int(posY[m]);
+                    const float inverseMass = 1.0f / mass[m];
                     const int centerIndex = centerX + centerY * Constants::N;
                     if (centerX >= 0 && centerX < Constants::N && centerY >= 0 && centerY < Constants::N) {
                         // Getting precalculated gradient. This should benefit from caching when many particles access same point.
@@ -463,8 +466,8 @@ namespace Kernels {
                         constexpr float dt = 0.002f;
                         posX[m] = fmaf(vxr[m], dt, posX[m]);
                         posY[m] = fmaf(vyr[m], dt, posY[m]);
-                        vxr[m] = fmaf(forceComponents.x, dt, vxr[m]);
-                        vyr[m] = fmaf(forceComponents.y, dt, vyr[m]);
+                        vxr[m] = fmaf(forceComponents.x * inverseMass, dt, vxr[m]);
+                        vyr[m] = fmaf(forceComponents.y * inverseMass, dt, vyr[m]);
                     }
                 }
                 __stcs(reinterpret_cast<float4*>(&x[index * 4]), make_float4(posX[0], posX[1], posX[2], posX[3]));
@@ -532,7 +535,7 @@ namespace Kernels {
         }
     }
     template<int N>
-    __global__ void k_scatterMassOnLattice(Constants::ComplexVar* lattice_d, const float* x, const float* y, const int numParticles) {
+    __global__ void k_scatterMassOnLattice(Constants::ComplexVar* lattice_d, const float* x, const float* y, const float* m, const int numParticles) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -544,11 +547,11 @@ namespace Kernels {
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < numParticles) {
-                const int xi = x[index];
-                const int yi = y[index];
+                const int xi = __ldcs(&x[index]);
+                const int yi = __ldcs(&y[index]);
                 if (xi >= 0 && xi < Constants::N && yi >= 0 && yi < Constants::N) {
                     // All particles have 1.0 mass.
-                    atomicAdd(&lattice_d[xi + yi * Constants::N].x, 1.0f);
+                    atomicAdd(&lattice_d[xi + yi * Constants::N].x, __ldcs(&m[index]));
                 }
             }
         }
@@ -582,6 +585,7 @@ private:
     // For host
     std::vector<float> x, y;
     std::vector<float> vx, vy;
+    std::vector<float> m;
     std::vector<float> lattice;
     std::vector<float> renderColor;
 
@@ -601,6 +605,7 @@ private:
     float* y_d;
     float* vx_d;
     float* vy_d;
+    float* m_d;
     float* renderColor_d;
 public:
     Universe(int particles = 0, int cudaDevice = 0) {
@@ -611,14 +616,15 @@ public:
         vx.resize(particles);
         y.resize(particles);
         vy.resize(particles);
+        m.resize(particles);
         renderColor.resize(particles);
         lattice.resize(Constants::N * Constants::N);
         mat = cv::Mat(cv::Size2i(Constants::N, Constants::N), CV_32FC1);
         const int centerX = Constants::N / 2;
         const int centerY = Constants::N / 2;
-        const float speed = 1.50f * ( numParticles > 10000000 ? sqrt(numParticles / 10000000.0) : 1.0);
+        const float speed = 50.0f * ( numParticles > 10000000 ? sqrt(numParticles / 10000000.0) : 1.0);
         for (int i = 0; i < particles; i++) {
-            const float r = rand() % (Constants::N / 3);
+            const float r = 30 + (rand() % (Constants::N / 3));
             const float a = Constants::MATH_PI * 2.0 * (rand() % 1000) / 1000.0f;
             // orbit position
             x[i] = r * cos(a) + Constants::N / 2;
@@ -626,10 +632,18 @@ public:
             const float vecX = x[i] - centerX;
             const float vecY = y[i] - centerY;
             // orbit velocity
-            vx[i] = vecY * speed / (sqrt(sqrt(r)) + 1.0f);
-            vy[i] = -vecX * speed / (sqrt(sqrt(r)) + 1.0f);
+            vx[i] = vecY * speed / pow(r + 1.0f, 0.85);
+            vy[i] = -vecX * speed / pow(r + 1.0f, 0.85);
             // random color
             renderColor[i] = 0.2f + ((rand() % 800) / 1000.0f);
+            m[i] = 1.0f;
+            if (i == 0) {
+                m[i] = 1 + numParticles / 100;
+                x[i] = centerX;
+                y[i] = centerY;
+                vx[i] = 0.0f;
+                vy[i] = 0.0f;
+            }
         }
         gpuErrchk(cudaEventCreate(&eventStart));
         gpuErrchk(cudaEventCreate(&eventStop));
@@ -641,11 +655,13 @@ public:
         gpuErrchk(cudaMalloc(&y_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMalloc(&vx_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMalloc(&vy_d, sizeof(float) * numParticles));
+        gpuErrchk(cudaMalloc(&m_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMalloc(&renderColor_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMemcpy(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(vx_d, vx.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(vy_d, vy.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(m_d, m.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(renderColor_d, renderColor.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         cudaFuncSetAttribute(Kernels::k_calcFftBatched1D<Constants::N>, cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxShared);
         cudaFuncSetAttribute(Kernels::k_calcFftBatched1D<Constants::N>, cudaFuncAttributeMaxDynamicSharedMemorySize, Constants::N * sizeof(Constants::ComplexVar));
@@ -657,15 +673,17 @@ public:
         cv::namedWindow("Fast Nbody");
     }
     // Requires same number of particles as the simulator.
-    void updateParticleData(std::vector<float> sourceX, std::vector<float> sourceY, std::vector<float> sourceVX, std::vector<float> sourceVY) {
+    void updateParticleData(std::vector<float> sourceX, std::vector<float> sourceY, std::vector<float> sourceVX, std::vector<float> sourceVY, std::vector<float> sourceMass) {
         x.swap(sourceX);
         y.swap(sourceY);
         vx.swap(sourceVX);
         vy.swap(sourceVY);
+        m.swap(sourceMass);
         gpuErrchk(cudaMemcpy(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(vx_d, vx.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(vy_d, vy.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(m_d, m.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
     }
     void startBenchmark() {
         gpuErrchk(cudaEventRecord(eventStart));
@@ -679,7 +697,7 @@ private:
         }
         else {
             Kernels::k_clearLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
-            Kernels::k_scatterMassOnLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, x_d, y_d, numParticles);
+            Kernels::k_scatterMassOnLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, x_d, y_d, m_d, numParticles);
         }
 
 
@@ -716,7 +734,7 @@ private:
     void multiSampleForces() {
         Kernels::k_shiftLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, latticeShifted_d);
         Kernels::k_calcGradientLattice<Constants::N> <<<Constants::BLOCKS, Constants::THREADS >>> (latticeShifted_d, latticeShiftedForceXY_d);
-        Kernels::k_forceMultiSampling<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (latticeShiftedForceXY_d, x_d, y_d, vx_d, vy_d, numParticles);
+        Kernels::k_forceMultiSampling<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (latticeShiftedForceXY_d, x_d, y_d, vx_d, vy_d, m_d, numParticles);
     }
     public:
     void nBody() {
@@ -771,6 +789,7 @@ private:
         gpuErrchk(cudaFree(y_d));
         gpuErrchk(cudaFree(vx_d));
         gpuErrchk(cudaFree(vy_d));
+        gpuErrchk(cudaFree(m_d));
         gpuErrchk(cudaFree(renderColor_d));
         gpuErrchk(cudaEventDestroy(eventStart));
         gpuErrchk(cudaEventDestroy(eventStop));
