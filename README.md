@@ -2,6 +2,11 @@
 
 Simulate millions of stars using a CUDA GPU, in few miliseconds.
 
+- Field projected masses
+- Convoluted force fields
+- Computed force gradients
+- O(N Log(N))
+
 10 Million Stars, 1024 x 1024 map (RTX4070):
 ```
 CUDA Nbody pipeline: 1.71934 milliseconds per step
