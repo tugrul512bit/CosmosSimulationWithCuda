@@ -638,7 +638,7 @@ public:
             renderColor[i] = 0.2f + ((rand() % 800) / 1000.0f);
             m[i] = 1.0f;
             if (i == 0) {
-                m[i] = 1 + numParticles / 100;
+                m[i] = 1 + numParticles / 120;
                 x[i] = centerX;
                 y[i] = centerY;
                 vx[i] = 0.0f;
