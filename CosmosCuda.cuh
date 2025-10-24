@@ -622,7 +622,7 @@ public:
         mat = cv::Mat(cv::Size2i(Constants::N, Constants::N), CV_32FC1);
         const int centerX = Constants::N / 2;
         const int centerY = Constants::N / 2;
-        const float speed = 50.0f * ( numParticles > 10000000 ? sqrt(numParticles / 10000000.0) : 1.0);
+        const float speed = 20.0f * ( numParticles > 10000000 ? sqrt(numParticles / 10000000.0) : 1.0);
         for (int i = 0; i < particles; i++) {
             const float r = 30 + (rand() % (Constants::N / 3));
             const float a = Constants::MATH_PI * 2.0 * (rand() % 1000) / 1000.0f;
@@ -632,8 +632,8 @@ public:
             const float vecX = x[i] - centerX;
             const float vecY = y[i] - centerY;
             // orbit velocity
-            vx[i] = vecY * speed / pow(r + 1.0f, 0.85);
-            vy[i] = -vecX * speed / pow(r + 1.0f, 0.85);
+            vx[i] = vecY * speed / pow(r + 1.0f, 0.9);
+            vy[i] = -vecX * speed / pow(r + 1.0f, 0.9);
             // random color
             renderColor[i] = 0.2f + ((rand() % 800) / 1000.0f);
             m[i] = 1.0f;
