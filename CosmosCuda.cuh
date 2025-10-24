@@ -85,7 +85,7 @@ namespace Kernels {
     __device__ __forceinline__ void d_calcWarpDft(Constants::ComplexVar& var, const int warpLane, const float inverseMult, Constants::ComplexVar* wCoefficients) {
         // Level 1
         int ofs = 0;
-#pragma unroll 1
+        #pragma unroll 1
         for (int level = 1; level <= 16; level <<= 1)
         {
             const int level2 = level * 2;
@@ -127,12 +127,10 @@ namespace Kernels {
         const float divider = inverse ? Constants::N : 1.0f;
         Constants::ComplexVar vars[blockSteps];
         extern __shared__ Constants::ComplexVar s_coalescing[];
-
-
         for (unsigned int grid = 0; grid < gridSteps; grid++) {
             const unsigned int row = grid * Constants::BLOCKS + block;
             if (row < Constants::N) {
-#pragma unroll
+                #pragma unroll
                 for (int blc = 0; blc < blockSteps; blc++) {
                     const unsigned int col = blc * Constants::THREADS + thread;
                     const int element = col + row * Constants::N;
@@ -141,7 +139,7 @@ namespace Kernels {
                     }
                 }
                 __syncthreads();
-#pragma unroll
+                #pragma unroll
                 for (int blc = 0; blc < blockSteps; blc++) {
                     const unsigned int col = blc * Constants::THREADS + thread;
                     if (col < Constants::N) {
@@ -152,7 +150,7 @@ namespace Kernels {
 
                 // todo: ping-pong buffer = less syncthreads, bigger input support
                 __syncthreads();
-#pragma unroll
+                #pragma unroll
                 for (int blc = 0; blc < blockSteps; blc++) {
                     const unsigned int col = blc * Constants::THREADS + thread;
                     if (col < Constants::N) {
@@ -160,12 +158,11 @@ namespace Kernels {
                     }
                 }
                 __syncthreads();
-              
                 int wOfs = 62;
-#pragma unroll 1
+                #pragma unroll 1
                 for (unsigned int level = 32; level < Constants::N; level <<= 1) {
                     const int level2 = level * 2;
-#pragma unroll
+                    #pragma unroll
                     for (int blc = 0; blc < blockSteps; blc++) {
                         const unsigned int col = blc * Constants::THREADS + thread;
                         if (col < Constants::N) {
@@ -184,7 +181,7 @@ namespace Kernels {
                     }
                     wOfs += level * 2;
                     __syncthreads();
-#pragma unroll
+                    #pragma unroll
                     for (int blc = 0; blc < blockSteps; blc++) {
                         const unsigned int col = blc * Constants::THREADS + thread;
                         if (col < Constants::N) {
@@ -193,7 +190,7 @@ namespace Kernels {
                     }
                     __syncthreads();
                 }
-#pragma unroll
+                #pragma unroll
                 for (int blc = 0; blc < blockSteps; blc++) {
                     const unsigned int col = blc * Constants::THREADS + thread;
                     const int element = col + row * Constants::N;
@@ -232,16 +229,12 @@ namespace Kernels {
 
     }
 
-
-
     template<int N>
     __global__ void k_calcTranspose(Constants::ComplexVar* data) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
         const int numThreads = blockDim.x;
-
-
         const int steps = (PAIR_LIST_SIZE + numBlocks - 1) / numBlocks;
         __shared__ Constants::ComplexVar s_tile[SUB_MATRIX_SIZE][SUB_MATRIX_SIZE + 1];
         __shared__ Constants::ComplexVar s_tile2[SUB_MATRIX_SIZE][SUB_MATRIX_SIZE + 1];
@@ -258,6 +251,7 @@ namespace Kernels {
                     const int tileOffset2 = tileY + tileX * Constants::N;
                     constexpr int SUB_ELEMENTS = SUB_MATRIX_SIZE * SUB_MATRIX_SIZE;
                     const int steps2 = (SUB_ELEMENTS + numThreads - 1) / numThreads;
+                    #pragma unroll
                     for (int k = 0; k < steps2; k++) {
                         const int element = k * numThreads + thread;
                         if (element < SUB_ELEMENTS) {
@@ -268,6 +262,7 @@ namespace Kernels {
                         }
                     }
                     __syncthreads();
+                    #pragma unroll
                     for (int k = 0; k < steps2; k++) {
                         const int element = k * numThreads + thread;
                         if (element < SUB_ELEMENTS) {
@@ -302,6 +297,7 @@ namespace Kernels {
                 const int tileOffset = tileX + tileY * Constants::N;
                 constexpr int SUB_ELEMENTS = SUB_MATRIX_SIZE * SUB_MATRIX_SIZE;
                 const int steps2 = (SUB_ELEMENTS + numThreads - 1) / numThreads;
+                #pragma unroll
                 for (int k = 0; k < steps2; k++) {
                     const int element = k * numThreads + thread;
                     if (element < SUB_ELEMENTS) {
@@ -311,6 +307,7 @@ namespace Kernels {
                     }
                 }
                 __syncthreads();
+                #pragma unroll
                 for (int k = 0; k < steps2; k++) {
                     const int element = k * numThreads + thread;
                     if (element < SUB_ELEMENTS) {
@@ -332,6 +329,7 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (Constants::N * Constants::N + numTotalThreads - 1) / numTotalThreads;
+        #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < Constants::N * Constants::N) {
@@ -362,6 +360,7 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (Constants::N * Constants::N + numTotalThreads - 1) / numTotalThreads;
+        #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < Constants::N * Constants::N) {
@@ -389,28 +388,44 @@ namespace Kernels {
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < N * N) {
-                const float centerData = __ldg(&lattice_d[index]);
+                const float centerData = __ldca(&lattice_d[index]);
                 float left = centerData;
                 float right = centerData;
                 float top = centerData;
                 float bot = centerData;
+                float leftLeft = centerData;
+                float rightRight = centerData;
+                float topTop = centerData;
+                float botBot = centerData;
                 const int centerX = index % N;
                 const int centerY = index / N;
                 if (centerX - 1 >= 0) {
-                    left = __ldg(&lattice_d[index - 1]);
+                    left = __ldca(&lattice_d[index - 1]);
                 }
                 if (centerX + 1 < Constants::N) {
-                    right = __ldg(&lattice_d[index + 1]);
+                    right = __ldca(&lattice_d[index + 1]);
                 }
                 if (centerY - 1 >= 0) {
-                    top = __ldg(&lattice_d[index - Constants::N]);
+                    top = __ldca(&lattice_d[index - Constants::N]);
                 }
                 if (centerY + 1 < Constants::N) {
-                    bot = __ldg(&lattice_d[index + Constants::N]);
+                    bot = __ldca(&lattice_d[index + Constants::N]);
+                }
+                if (centerX - 2 >= 0) {
+                    leftLeft = __ldca(&lattice_d[index - 2]);
+                }
+                if (centerX + 2 < Constants::N) {
+                    rightRight = __ldca(&lattice_d[index + 2]);
+                }
+                if (centerY - 2 >= 0) {
+                    topTop = __ldca(&lattice_d[index - 2*Constants::N]);
+                }
+                if (centerY + 2 < Constants::N) {
+                    botBot = __ldca(&lattice_d[index + 2*Constants::N]);
                 }
                 // Gradient
-                const float forceComponentX = (right - left) * 0.5f;
-                const float forceComponentY = (bot - top) * 0.5f;
+                const float forceComponentX = (-rightRight + 8.0f * right - 8.0f * left + leftLeft) * (1.0f / 12.0f);
+                const float forceComponentY = (-botBot + 8.0f * bot - 8.0f * top + topTop) * (1.0f / 12.0f);
                 latticeForceXY_d[index] = make_float2(forceComponentX, forceComponentY);
             }
         }
@@ -429,24 +444,23 @@ namespace Kernels {
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < numParticles / 4) {
-                // Particle data is not expected to fit L2/L3 cache.
+                // Particle data is not expected to fit caches.
                 const float4 posXr = __ldcs(reinterpret_cast<float4*>(&x[index * 4]));
                 const float4 posYr = __ldcs(reinterpret_cast<float4*>(&y[index * 4]));
                 const float4 posVXr = __ldcs(reinterpret_cast<float4*>(&vx[index * 4]));
                 const float4 posVYr = __ldcs(reinterpret_cast<float4*>(&vy[index * 4]));
-
-                float posX[4] = { posXr.x,posXr.z,posXr.y,posXr.w };
-                float posY[4] = { posYr.x,posYr.z,posYr.y,posYr.w };
-                float vxr[4] = { posVXr.x, posVXr.z, posVXr.y, posVXr.w };
-                float vyr[4] = { posVYr.x, posVYr.z, posVYr.y, posVYr.w };
-#pragma unroll 4
+                float posX[4] = { posXr.x,posXr.y,posXr.z,posXr.w };
+                float posY[4] = { posYr.x,posYr.y,posYr.z,posYr.w };
+                float vxr[4] = { posVXr.x, posVXr.y, posVXr.z, posVXr.w };
+                float vyr[4] = { posVYr.x, posVYr.y, posVYr.z, posVYr.w };
+                #pragma unroll 4
                 for (int m = 0; m < 4; m++) {
                     const int centerX = int(posX[m]);
                     const int centerY = int(posY[m]);
                     const int centerIndex = centerX + centerY * Constants::N;
                     if (centerX >= 0 && centerX < Constants::N && centerY >= 0 && centerY < Constants::N) {
                         // Getting precalculated gradient. This should benefit from caching when many particles access same point.
-                        const float2 forceComponents = __ldg(&latticeForceXY_d[centerIndex]);
+                        const float2 forceComponents = __ldca(&latticeForceXY_d[centerIndex]);
                         constexpr float dt = 0.002f;
                         posX[m] = fmaf(vxr[m], dt, posX[m]);
                         posY[m] = fmaf(vyr[m], dt, posY[m]);
@@ -472,6 +486,7 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (Constants::N * Constants::N + numTotalThreads - 1) / numTotalThreads;
+        #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < Constants::N * Constants::N) {
@@ -488,6 +503,7 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (Constants::N * Constants::N + numTotalThreads - 1) / numTotalThreads;
+        #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < Constants::N * Constants::N) {
@@ -504,6 +520,7 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (Constants::N * Constants::N + numTotalThreads - 1) / numTotalThreads;
+        #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < Constants::N * Constants::N) {
@@ -524,12 +541,14 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (numParticles + numTotalThreads - 1) / numTotalThreads;
+        #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < numParticles) {
                 const int xi = x[index];
                 const int yi = y[index];
                 if (xi >= 0 && xi < Constants::N && yi >= 0 && yi < Constants::N) {
+                    // All particles have 1.0 mass.
                     atomicAdd(&lattice_d[xi + yi * Constants::N].x, 1.0f);
                 }
             }
@@ -544,6 +563,7 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (numParticles + numTotalThreads - 1) / numTotalThreads;
+        #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < numParticles) {
