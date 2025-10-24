@@ -12,6 +12,7 @@
 #include <iostream>
 #include <thread>
 #include <cuda_runtime.h>
+#include <cuda_pipeline.h>
 #ifndef PARALLEL_FOR
 #define PARALLEL_FOR(N,O) \
                         struct LocalClass                                                           \
@@ -376,6 +377,7 @@ namespace Kernels {
             }
         }
     }
+
     template<int N>
     __global__ void k_forceMultiSampling(const float* const __restrict__ lattice_d, float* const __restrict__ x, float* const __restrict__ y, float* const __restrict__ vx, float* const __restrict__ vy, const int numParticles) {
         const int thread = threadIdx.x;
@@ -384,13 +386,11 @@ namespace Kernels {
         const int numThreads = blockDim.x;
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
-
-        // 4-wide coarsening for the memory bottleneck.
-        // todo: use smem tiling for lattice re-use
-        const int steps = (numParticles/4 + numTotalThreads - 1) / numTotalThreads;
+        const int steps = (numParticles / 4 + numTotalThreads - 1) / numTotalThreads;
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
-            if (index < numParticles/4) {
+            if (index < numParticles / 4) {
+                
                 const float4 posXr = __ldcs(reinterpret_cast<float4*>(&x[index * 4]));
                 const float4 posYr = __ldcs(reinterpret_cast<float4*>(&y[index * 4]));
                 const float4 posVXr = __ldcs(reinterpret_cast<float4*>(&vx[index * 4]));
@@ -398,9 +398,9 @@ namespace Kernels {
 
                 float posX[4] = { posXr.x,posXr.z,posXr.y,posXr.w };
                 float posY[4] = { posYr.x,posYr.z,posYr.y,posYr.w };
-                float vxr[4] = { posVXr.x, posVXr.z, posVXr.y, posVXr.w};
+                float vxr[4] = { posVXr.x, posVXr.z, posVXr.y, posVXr.w };
                 float vyr[4] = { posVYr.x, posVYr.z, posVYr.y, posVYr.w };
-                #pragma unroll 4
+#pragma unroll 4
                 for (int m = 0; m < 4; m++) {
                     // Sampling
                     const int centerX = int(posX[m]);
@@ -434,13 +434,15 @@ namespace Kernels {
                         vyr[m] += forceComponentY * dt;
                     }
                 }
-                __stcs(reinterpret_cast<float4*>(&x[index*4]), make_float4(posX[0], posX[1], posX[2], posX[3]));
+                __stcs(reinterpret_cast<float4*>(&x[index * 4]), make_float4(posX[0], posX[1], posX[2], posX[3]));
                 __stcs(reinterpret_cast<float4*>(&y[index * 4]), make_float4(posY[0], posY[1], posY[2], posY[3]));
                 __stcs(reinterpret_cast<float4*>(&vx[index * 4]), make_float4(vxr[0], vxr[1], vxr[2], vxr[3]));
                 __stcs(reinterpret_cast<float4*>(&vy[index * 4]), make_float4(vyr[0], vyr[1], vyr[2], vyr[3]));
             }
         }
     }
+
+
     template<int N>
     __global__ void k_clearLattice(Constants::ComplexVar* lattice_d) {
         const int thread = threadIdx.x;
