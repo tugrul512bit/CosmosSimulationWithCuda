@@ -323,7 +323,7 @@ namespace Kernels {
         }
     }
     template<int N>
-    __global__ void k_generateFilterLattice(Constants::ComplexVar* data) {
+    __global__ void k_generateFilterLattice(Constants::ComplexVar* data, bool accuracy) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -331,7 +331,11 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (Constants::N * Constants::N + numTotalThreads - 1) / numTotalThreads;
-        constexpr float cutoff = 2.0f;//(Constants::LOCAL_CONV_WIDTH - 1) / 2;
+        //constexpr float cutoff = 2.0f;
+        // when accuracy mode enabled, a second lattice is computed only for closest neighbors (within 16 lattice cells radius) using direct convolution.
+        constexpr float selfForceAvoidance = 2.0f;
+        constexpr float shortRangeForceRange = (Constants::LOCAL_CONV_WIDTH - 1) / 2.0f;
+        const float cutoff = accuracy ? shortRangeForceRange : selfForceAvoidance;
         #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
@@ -798,7 +802,7 @@ public:
         cudaFuncSetAttribute(Kernels::k_calcFftBatched1D<Constants::N>, cudaFuncAttributeMaxDynamicSharedMemorySize, Constants::N * sizeof(Constants::ComplexVar));
         Kernels::k_fillCoefficientArray<Constants::N> << <1, 1024 >> > ();
         Kernels::k_fillPairIndexList<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > ();
-        Kernels::k_generateFilterLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (filter_d);
+        Kernels::k_generateFilterLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (filter_d, accuracy);
         calcFilterFft2D();
         gpuErrchk(cudaDeviceSynchronize());
         cv::namedWindow("Fast Nbody");
