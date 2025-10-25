@@ -44,11 +44,13 @@ namespace Constants {
     // CUDA grid and block sizes. (currently tuned for RTX4070)
     constexpr int BLOCKS = 46 * 3;
     constexpr int THREADS = 512;
-    // FFT uses these
+    // FFT uses these (long-range force calculation)
     // N is width of lattice (N x N) and can be only a power of 2. Higher value increases accuracy. For full accuracy, it needs a truncated filter lattice + closest-neighbor search algorithm (for scientific work, which also requires interpolation between cells of lattice).
     constexpr int N = 2048;
     constexpr double MATH_PI = 3.14159265358979323846;
     using ComplexVar = float2;
+    // Local convolution (short-range force calculation)
+    constexpr int LOCAL_CONV_WIDTH = 33;
 }
 
 namespace Kernels {
@@ -329,6 +331,7 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (Constants::N * Constants::N + numTotalThreads - 1) / numTotalThreads;
+        constexpr float cutoff = (Constants::LOCAL_CONV_WIDTH - 1) / 2;
         #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
@@ -342,7 +345,7 @@ namespace Kernels {
                 const float r = sqrtf(dx * dx + dy * dy);
                 float mult = 1.0f;
                 
-                if (r > 0.0f) {
+                if (r > cutoff) {
                     data[((i + Constants::N / 2) % Constants::N) + ((j + Constants::N / 2) % Constants::N) * Constants::N].x = mult / r;
                     data[((i + Constants::N / 2) % Constants::N) + ((j + Constants::N / 2) % Constants::N) * Constants::N].y = 0.0f;
                 }
@@ -543,8 +546,9 @@ namespace Kernels {
             }
         }
     }
+    // Optionally shifts and adds local values to global.
     template<int N>
-    __global__ void k_shiftLattice(Constants::ComplexVar* lattice_d, float* latticeShifted_d) {
+    __global__ void k_shiftLattice(Constants::ComplexVar* lattice_d, float* latticeLocal_d, float* latticeShifted_d, bool accuracy) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -561,7 +565,12 @@ namespace Kernels {
                 const int shiftedX = (x - Constants::N / 2 + Constants::N * 2) % Constants::N;
                 const int shiftedY = (y - Constants::N / 2 + Constants::N * 2) % Constants::N;
                 //latticeShifted_d[index] = lattice_d[shiftedX + shiftedY * Constants::N].x;
-                latticeShifted_d[index] = lattice_d[index].x;
+                if (accuracy) {
+                    latticeShifted_d[index] = lattice_d[index].x + latticeLocal_d[index];
+                }
+                else {
+                    latticeShifted_d[index] = lattice_d[index].x;
+                }
             }
         }
     }
@@ -627,6 +636,65 @@ namespace Kernels {
             }
         }
     }
+
+    template<int N>
+    __global__ void k_cloneLatticeForShortRangeCalc(Constants::ComplexVar* lattice_d, float* localForceLattice_d) {
+        const int thread = threadIdx.x;
+        const int block = blockIdx.x;
+        const int numBlocks = gridDim.x;
+        const int numThreads = blockDim.x;
+        const int globalThread = thread + block * numThreads;
+        const int numTotalThreads = numThreads * numBlocks;
+        const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
+        for (int ii = 0; ii < steps; ii++) {
+            const int index = ii * numTotalThreads + globalThread;
+            if (index < N * N) {
+                localForceLattice_d[index] = lattice_d[index].x;
+            }
+        }
+    }
+
+    // This is to capture short-range details missed by FFT. (todo: use smooth transition from 0 to 16 when combining)
+    // Todo: optimize with smem
+    __constant__ float shortRangeGravKern_c[Constants::LOCAL_CONV_WIDTH * Constants::LOCAL_CONV_WIDTH];
+    template<int N>
+    __global__ void k_calcLocalMassConvolution(float* localForceLattice_d, float* localForceLatticeResult_d) {
+        const int thread = threadIdx.x;
+        const int block = blockIdx.x;
+        const int numBlocks = gridDim.x;
+        const int numThreads = blockDim.x;
+        const int globalThread = thread + block * numThreads;
+        const int numTotalThreads = numThreads * numBlocks;
+        const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
+        constexpr int HALF_WIDTH = (Constants::LOCAL_CONV_WIDTH - 1) / 2;
+        for (int ii = 0; ii < steps; ii++) {
+            const int index = ii * numTotalThreads + globalThread;
+            if (index < N * N) {
+                const int indexX = index % N;
+                const int indexY = index / N;
+                
+                float accumulator = 0.0f;
+                #pragma unroll
+                for (int iy = -HALF_WIDTH; iy <= HALF_WIDTH; iy++) {
+                    #pragma unroll
+                    for (int ix = -HALF_WIDTH; ix <= HALF_WIDTH; ix++) {
+                        const int neighborX = ix + indexX;
+                        const int neighborY = iy + indexY;
+                        const int neighbor = neighborX + neighborY * N;
+                        if (neighborX >= 0 && neighborX < Constants::N && neighborY >= 0 && neighborY < Constants::N) {
+                            const float neighborData = localForceLattice_d[neighbor];
+                            const float weight = shortRangeGravKern_c[ix + HALF_WIDTH + (iy + HALF_WIDTH) * Constants::LOCAL_CONV_WIDTH];
+                            // Todo: add more accumulators to reduce rounding error.
+                            accumulator = fmaf(neighborData, weight, accumulator);
+                        }
+                    }
+                }
+                localForceLatticeResult_d[index] = accumulator;
+                
+            }
+            __syncthreads();
+        }
+    }
 }
 
 struct Universe {
@@ -656,7 +724,8 @@ private:
     float* vy_d;
     float* m_d;
     float* renderColor_d;
-
+    float* localForceLattice_d;
+    float* localForceLatticeResult_d;
     // Accuracy setting: increases accuracy of mass projections and force sampling at cost of 50% performance
     bool accuracy;
     // Window stats
@@ -695,10 +764,28 @@ public:
             renderColor[i] = 0.2f + ((rand() % 800) / 1000.0f);
             m[i] = 1.0f;
         }
+        constexpr int HALF_WIDTH = (Constants::LOCAL_CONV_WIDTH - 1) / 2;
+        std::vector<float> localForceFilter(Constants::LOCAL_CONV_WIDTH * Constants::LOCAL_CONV_WIDTH);
+        for (int iy = -HALF_WIDTH; iy <= HALF_WIDTH; iy++) {
+            for (int ix = -HALF_WIDTH; ix <= HALF_WIDTH; ix++) {
+                const int index = ix + HALF_WIDTH + (iy + HALF_WIDTH) * Constants::LOCAL_CONV_WIDTH;
+                const double r = sqrt((double)(ix * ix + iy * iy));
+                if (r > 0.0f && r < HALF_WIDTH) {
+                    localForceFilter[index] = 1.0f / r;
+                }
+                else {
+                    localForceFilter[index] = 0.0f;
+                }
+            }
+        }
+        gpuErrchk(cudaMemcpyToSymbol(Kernels::shortRangeGravKern_c, localForceFilter.data(), sizeof(float) * Constants::LOCAL_CONV_WIDTH * Constants::LOCAL_CONV_WIDTH, 0, cudaMemcpyHostToDevice));
         particleCounter = numParticles;
         gpuErrchk(cudaEventCreate(&eventStart));
         gpuErrchk(cudaEventCreate(&eventStop));
         gpuErrchk(cudaMalloc(&lattice_d, sizeof(Constants::ComplexVar) * Constants::N * Constants::N));
+        gpuErrchk(cudaMalloc(&localForceLattice_d, sizeof(float) * Constants::N * Constants::N));
+        gpuErrchk(cudaMalloc(&localForceLatticeResult_d, sizeof(float) * Constants::N * Constants::N));
+        
         gpuErrchk(cudaMalloc(&latticeShifted_d, sizeof(float) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&latticeShiftedForceXY_d, sizeof(float2) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&filter_d, sizeof(Constants::ComplexVar) * Constants::N * Constants::N));
@@ -784,6 +871,11 @@ private:
         else {
             Kernels::k_clearLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
             Kernels::k_scatterMassOnLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, x_d, y_d, m_d, numParticles, accuracy);
+            // Accuracy mode also adds a short-range force component using normal convolution.
+            if (accuracy) {
+                Kernels::k_cloneLatticeForShortRangeCalc<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, localForceLattice_d);
+                Kernels::k_calcLocalMassConvolution<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (localForceLattice_d, localForceLatticeResult_d);
+            }
         }
 
 
@@ -818,7 +910,7 @@ private:
         Kernels::k_calcTransposeDiagonals<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d);
     }
     void multiSampleForces() {
-        Kernels::k_shiftLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, latticeShifted_d);
+        Kernels::k_shiftLattice<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, localForceLatticeResult_d, latticeShifted_d, accuracy);
         Kernels::k_calcGradientLattice<Constants::N> <<<Constants::BLOCKS, Constants::THREADS >>> (latticeShifted_d, latticeShiftedForceXY_d);
         Kernels::k_forceMultiSampling<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (latticeShiftedForceXY_d, x_d, y_d, vx_d, vy_d, m_d, numParticles, accuracy);
     }
@@ -868,6 +960,8 @@ private:
     ~Universe() {
         cv::destroyAllWindows();
         gpuErrchk(cudaFree(lattice_d));
+        gpuErrchk(cudaFree(localForceLattice_d));
+        gpuErrchk(cudaFree(localForceLatticeResult_d));
         gpuErrchk(cudaFree(latticeShifted_d));
         gpuErrchk(cudaFree(latticeShiftedForceXY_d));
         gpuErrchk(cudaFree(filter_d));

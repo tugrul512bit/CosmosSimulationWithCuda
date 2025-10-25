@@ -11,7 +11,7 @@ int main() {
     // cuda device index
     const int device = 0;
     // true: more performance
-    const bool lowAccuracy = false;
+    const bool lowAccuracy = true;
     // Window width/height
     const int w = 1340;
     const int h = 1340;
