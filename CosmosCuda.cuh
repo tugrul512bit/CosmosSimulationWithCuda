@@ -487,7 +487,7 @@ namespace Kernels {
                                 forceComponentsRight.y * fractionalX * yDiff1 +
                                 forceComponentsBottom.y * xDiff1 * fractionalY +
                                 forceComponentsBottomRight.y * fractionalX * fractionalY;
-                            constexpr float dt = 0.01f;
+                            constexpr float dt = 0.002f;
                             posX[m] = fmaf(vxr[m], dt, posX[m]);
                             posY[m] = fmaf(vyr[m], dt, posY[m]);
                             vxr[m] = fmaf(xComponent * inverseMass, dt, vxr[m]);
@@ -495,7 +495,7 @@ namespace Kernels {
                         }
                         else {
                             const float2 forceComponentsCurrent = __ldca(&latticeForceXY_d[centerIndex]);
-                            constexpr float dt = 0.01f;
+                            constexpr float dt = 0.002f;
                             posX[m] = fmaf(vxr[m], dt, posX[m]);
                             posY[m] = fmaf(vyr[m], dt, posY[m]);
                             vxr[m] = fmaf(forceComponentsCurrent.x * inverseMass, dt, vxr[m]);
@@ -764,7 +764,7 @@ public:
             for (int ix = -HALF_WIDTH; ix <= HALF_WIDTH; ix++) {
                 const int index = ix + HALF_WIDTH + (iy + HALF_WIDTH) * Constants::LOCAL_CONV_WIDTH;
                 const double r = sqrt((double)(ix * ix + iy * iy));
-                if (r > 0.0 && r < HALF_WIDTH) {
+                if (r > 2.0 && r < HALF_WIDTH) {
                     localForceFilter[index] = 1.0f / r;
                 }
                 else {

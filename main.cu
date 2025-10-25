@@ -7,7 +7,7 @@
 int main() {
     const int numNbodySimulationsPerRender = 2;
     // 20 Bytes per particle is allocated.
-    const int maximumParticles = 1000 * 1000 * 10;
+    const int maximumParticles = 1000 * 1000 * 20;
     // cuda device index
     const int device = 0;
     // true: more performance
@@ -20,19 +20,17 @@ int main() {
     if (galaxyCollisionScenario) {
         cosmos.clear();
         // Creating two galaxies in a collision course.
-        const int numParticlesPerGalaxy = 7000000;
+        const int numParticlesPerGalaxy = 10000000;
         const float centerOfGalaxyX = 0.25f;
         const float centerOfGalaxyY = 0.25f;
-        const float angularVelocityOfGalaxy = 0.3f;
+        const float angularVelocityOfGalaxy = 0.4f;
         const float massPerParticle = 0.01f;
         const float radiusOfGalaxy = 0.2f;
         const float firstGalaxyCenterOfMassVelocityX = 0.01f;
         const float firstGalaxyCenterOfMassVelocityY = 0.01f;
         const float secondGalaxyCenterOfMassVelocityX = -0.01f;
         const float secondGalaxyCenterOfMassVelocityY = -0.01f;
-        // This galaxy gets 7M particles.
         cosmos.addGalaxy(numParticlesPerGalaxy, centerOfGalaxyX, centerOfGalaxyY, angularVelocityOfGalaxy, massPerParticle, radiusOfGalaxy, firstGalaxyCenterOfMassVelocityX, firstGalaxyCenterOfMassVelocityY);
-        // Remaining particles (3M) are left for this galaxy.
         cosmos.addGalaxy(numParticlesPerGalaxy, centerOfGalaxyX + 0.50f, centerOfGalaxyY + 0.50f, angularVelocityOfGalaxy, massPerParticle, radiusOfGalaxy, secondGalaxyCenterOfMassVelocityX, secondGalaxyCenterOfMassVelocityY);
     }
 
