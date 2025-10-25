@@ -658,43 +658,61 @@ namespace Kernels {
         }
     }
 
-    // This is to capture short-range details missed by FFT. (todo: use smooth transition from 0 to 16 when combining)
-    // Todo: optimize with smem
+    // This is to capture short-range details missed by FFT.
     __constant__ float shortRangeGravKern_c[Constants::LOCAL_CONV_WIDTH * Constants::LOCAL_CONV_WIDTH];
-    template<int N>
-    __global__ void k_calcLocalMassConvolution(float* localForceLattice_d, float* localForceLatticeResult_d) {
-        const int thread = threadIdx.x;
-        const int block = blockIdx.x;
-        const int numBlocks = gridDim.x;
-        const int numThreads = blockDim.x;
-        const int globalThread = thread + block * numThreads;
-        const int numTotalThreads = numThreads * numBlocks;
-        const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
-        constexpr int HALF_WIDTH = (Constants::LOCAL_CONV_WIDTH - 1) / 2;
-        for (int ii = 0; ii < steps; ii++) {
-            const int index = ii * numTotalThreads + globalThread;
-            if (index < N * N) {
-                const int indexX = index % N;
-                const int indexY = index / N;
-                
-                float accumulator = 0.0f;
+    constexpr int TILE_SIZE = 32;
+    template< int K>
+    __global__ void k_calcLocalMassConvolution(const float* const __restrict__ latticeIn_d, float* const __restrict__ latticeOut_d) {
+        const int threadX = threadIdx.x;
+        const int threadY = threadIdx.y;
+        const int blockX = blockIdx.x;
+        const int blockY = blockIdx.y;
+        const int numThreadsX = blockDim.x;
+        const int numThreadsY = blockDim.y;
+        const int numBlocksX = gridDim.x;
+        const int numBlocksY = gridDim.y;
+        const int numTilesPerX = Constants::N / TILE_SIZE;
+        const int numTilesPerY = Constants::N / TILE_SIZE;
+        constexpr int tileElements = (TILE_SIZE + K) * (TILE_SIZE + K);
+        const int tileLoadSteps = (tileElements + numThreadsX * numThreadsY - 1) / (numThreadsX * numThreadsY);
+        constexpr int halfK = (K - 1) / 2;
+        extern __shared__ float s_cache[];
+        for (int tileY = 0; tileY < numTilesPerY / numBlocksY; tileY++) {
+            for (int tileX = 0; tileX < numTilesPerX / numBlocksX; tileX++) {
+                const int tileXX = tileX * numBlocksX + blockX;
+                const int tileYY = tileY * numBlocksY + blockY;
+                const int tileOffset = tileXX * TILE_SIZE + tileYY * TILE_SIZE * Constants::N;
                 #pragma unroll
-                for (int iy = -HALF_WIDTH; iy <= HALF_WIDTH; iy++) {
-                    #pragma unroll
-                    for (int ix = -HALF_WIDTH; ix <= HALF_WIDTH; ix++) {
-                        const int neighborX = ix + indexX;
-                        const int neighborY = iy + indexY;
-                        const int neighbor = neighborX + neighborY * N;
-                        if (neighborX >= 0 && neighborX < Constants::N && neighborY >= 0 && neighborY < Constants::N) {
-                            const float neighborData = localForceLattice_d[neighbor];
-                            const float weight = shortRangeGravKern_c[ix + HALF_WIDTH + (iy + HALF_WIDTH) * Constants::LOCAL_CONV_WIDTH];
-                            // Todo: add more accumulators to reduce rounding error.
-                            accumulator = fmaf(neighborData, weight, accumulator);
+                for (int load = 0; load < tileLoadSteps; load++) {
+                    const int loadT = load * numThreadsX * numThreadsY + threadX + threadY * numThreadsX;
+                    const int loadedX = loadT % (TILE_SIZE + K);
+                    const int loadedY = loadT / (TILE_SIZE + K);
+
+                    const int loaded = loadedX + loadedY * (TILE_SIZE + K);
+                    if (loadedY < (TILE_SIZE + K) && loadedX < (TILE_SIZE + K)) {
+                        if (loadedX + tileXX * TILE_SIZE - halfK >= 0 && loadedX + tileXX * TILE_SIZE - halfK < Constants::N &&
+                            loadedY + tileYY * TILE_SIZE - halfK >= 0 && loadedY + tileYY * TILE_SIZE - halfK < Constants::N) {
+                            s_cache[loaded] = __ldg(&latticeIn_d[tileOffset + loadedX - halfK + (loadedY - halfK) * Constants::N]);
+                        }
+                        else {
+                            s_cache[loaded] = 0.0f;
                         }
                     }
+
                 }
-                localForceLatticeResult_d[index] = accumulator;
-                
+                __syncthreads();
+                float acc[2] = { 0.0f, 0.0f };
+                #pragma unroll K
+                for (int iy = -halfK; iy <= halfK; iy++) {
+                    #pragma unroll K
+                    for (int ix = -halfK; ix <= halfK; ix++) {
+                        const int neighborX = ix + threadX + halfK;
+                        const int neighborY = iy + threadY + halfK;
+                        acc[(ix + halfK)&1] = fmaf(s_cache[neighborX + neighborY * (TILE_SIZE + K)], shortRangeGravKern_c[ix + halfK + (iy + halfK) * K], acc[(ix + halfK) & 1]);
+                    }
+                }
+                __syncthreads();
+                latticeOut_d[tileOffset + threadX + threadY * Constants::N] = acc[0] + acc[1];
             }
         }
     }
@@ -871,7 +889,7 @@ private:
             // Accuracy mode also adds a short-range force component using normal convolution.
             if (accuracy) {
                 Kernels::k_cloneLatticeForShortRangeCalc<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (lattice_d, localForceLattice_d);
-                Kernels::k_calcLocalMassConvolution<Constants::N> << <Constants::BLOCKS, Constants::THREADS >> > (localForceLattice_d, localForceLatticeResult_d);
+                Kernels::k_calcLocalMassConvolution<Constants::LOCAL_CONV_WIDTH> <<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE) >> > (localForceLattice_d, localForceLatticeResult_d);
             }
         }
 
