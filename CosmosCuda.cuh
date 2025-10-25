@@ -339,14 +339,16 @@ namespace Kernels {
                 const int cy = Constants::N / 2;
                 const float dx = i - cx;
                 const float dy = j - cy;
-                const float r2 = dx * dx + dy * dy;
-                if (r2 > 0.0f) {
-                    data[i + j * Constants::N].x = 1.0f / sqrtf(r2);
-                    data[i + j * Constants::N].y = 0.0f;
+                const float r = sqrtf(dx * dx + dy * dy);
+                float mult = 1.0f;
+                
+                if (r > 0.0f) {
+                    data[((i + Constants::N / 2) % Constants::N) + ((j + Constants::N / 2) % Constants::N) * Constants::N].x = mult / r;
+                    data[((i + Constants::N / 2) % Constants::N) + ((j + Constants::N / 2) % Constants::N) * Constants::N].y = 0.0f;
                 }
                 else {
-                    data[i + j * Constants::N].x = 0.0f;
-                    data[i + j * Constants::N].y = 0.0f;
+                    data[((i + Constants::N / 2) % Constants::N) + ((j + Constants::N / 2) % Constants::N) * Constants::N].x = 0.0f;
+                    data[((i + Constants::N / 2) % Constants::N) + ((j + Constants::N / 2) % Constants::N) * Constants::N].y = 0.0f;
                 }
             }
         }
@@ -424,8 +426,10 @@ namespace Kernels {
                     botBot = __ldca(&lattice_d[index + 2*Constants::N]);
                 }
                 // Gradient
-                const float forceComponentX = (-rightRight + 8.0f * right - 8.0f * left + leftLeft) * (1.0f / 12.0f);
-                const float forceComponentY = (-botBot + 8.0f * bot - 8.0f * top + topTop) * (1.0f / 12.0f);
+                const float h = 1.0f / Constants::N;
+                const float forceComponentX = (-rightRight + 8.0f * right - 8.0f * left + leftLeft) / (h * 12.0f);
+                const float forceComponentY = (-botBot + 8.0f * bot - 8.0f * top + topTop) / (h * 12.0f);
+                
                 latticeForceXY_d[index] = make_float2(forceComponentX, forceComponentY);
             }
         }
@@ -480,7 +484,7 @@ namespace Kernels {
                                 forceComponentsRight.y * fractionalX * yDiff1 +
                                 forceComponentsBottom.y * xDiff1 * fractionalY +
                                 forceComponentsBottomRight.y * fractionalX * fractionalY;
-                            constexpr float dt = 0.002f;
+                            constexpr float dt = 0.0001f;
                             posX[m] = fmaf(vxr[m], dt, posX[m]);
                             posY[m] = fmaf(vyr[m], dt, posY[m]);
                             vxr[m] = fmaf(xComponent * inverseMass, dt, vxr[m]);
@@ -488,7 +492,7 @@ namespace Kernels {
                         }
                         else {
                             const float2 forceComponentsCurrent = __ldca(&latticeForceXY_d[centerIndex]);
-                            constexpr float dt = 0.002f;
+                            constexpr float dt = 0.0001f;
                             posX[m] = fmaf(vxr[m], dt, posX[m]);
                             posY[m] = fmaf(vyr[m], dt, posY[m]);
                             vxr[m] = fmaf(forceComponentsCurrent.x * inverseMass, dt, vxr[m]);
@@ -556,7 +560,8 @@ namespace Kernels {
                 const int y = index / Constants::N;
                 const int shiftedX = (x - Constants::N / 2 + Constants::N * 2) % Constants::N;
                 const int shiftedY = (y - Constants::N / 2 + Constants::N * 2) % Constants::N;
-                latticeShifted_d[index] = lattice_d[shiftedX + shiftedY * Constants::N].x;
+                //latticeShifted_d[index] = lattice_d[shiftedX + shiftedY * Constants::N].x;
+                latticeShifted_d[index] = lattice_d[index].x;
             }
         }
     }
@@ -632,6 +637,7 @@ private:
     std::vector<float> m;
     std::vector<float> lattice;
     std::vector<float> renderColor;
+    int particleCounter;
 
     // For OpenCV
     cv::Mat mat;
@@ -661,6 +667,7 @@ public:
         ww = windowWidthPixels;
         wh = windowHeightPixels;
         accuracy = !lowAccuracy;
+        particleCounter = 0;
         cudaSetDevice(cudaDevice);
         srand(time(0));
         numParticles = particles;
@@ -675,28 +682,20 @@ public:
         const int centerX = Constants::N / 2;
         const int centerY = Constants::N / 2;
         const float speed = 0.1f * ( numParticles > 10000000 ? sqrt(numParticles / 10000000.0) : 1.0);
+        int ctr = 0;
+        int ctr2 = 0;
+        float nSqrt = sqrtf(numParticles);
+        int nSqrtI = nSqrt;
         for (int i = 0; i < particles; i++) {
-            const float r = 20 + (rand() % (Constants::N / 3));
-            const float a = Constants::MATH_PI * 2.0 * (rand() % 1000) / 1000.0f;
-            // orbit position
-            x[i] = r * cos(a) + Constants::N / 2;
-            y[i] = r * sin(a) + Constants::N / 2;
-            const float vecX = x[i] - centerX;
-            const float vecY = y[i] - centerY;
-            // orbit velocity
-            vx[i] = vecY * speed;
-            vy[i] = -vecX * speed;
+            x[i] = (rand() % Constants::N);
+            y[i] = (rand() % Constants::N);
+            vx[i] = 0;
+            vy[i] = 0;
             // random color
             renderColor[i] = 0.2f + ((rand() % 800) / 1000.0f);
             m[i] = 1.0f;
-            if (i == 0) {
-                m[i] = 1 + numParticles / 120;
-                x[i] = centerX;
-                y[i] = centerY;
-                vx[i] = 0.0f;
-                vy[i] = 0.0f;
-            }
         }
+        particleCounter = numParticles;
         gpuErrchk(cudaEventCreate(&eventStart));
         gpuErrchk(cudaEventCreate(&eventStop));
         gpuErrchk(cudaMalloc(&lattice_d, sizeof(Constants::ComplexVar) * Constants::N * Constants::N));
@@ -731,6 +730,41 @@ public:
         vx.swap(sourceVX);
         vy.swap(sourceVY);
         m.swap(sourceMass);
+        gpuErrchk(cudaMemcpy(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(vx_d, vx.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(vy_d, vy.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(m_d, m.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+    }
+    // Moves all particles out of simulation area.
+    void clear() {
+        for (int i = 0; i < numParticles; i++) {
+            x[i] = -10.0f;
+            y[i] = -10.0f;
+        }
+        gpuErrchk(cudaMemcpy(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpy(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+        particleCounter = 0;
+    }
+    // Adds a galaxy with n particles, with center at (centerX, centerY) normalized coordinates.
+    void addGalaxy(int n, float normalizedCenterX = 0.5f, float normalizedCenterY = 0.5f, float angularVelocity = 1.0f, float massPerParticle = 1.0f, float normalizedRadius = 0.3f, float centerOfMassVelocityX = 0.0f, float centerOfMassVelocityY = 0.0f) {
+        const int maxCount = min(particleCounter + n, numParticles);
+        for (int i = particleCounter; i < maxCount; i++) {
+            const float r = rand() % (int)(Constants::N * normalizedRadius);
+            const float a = Constants::MATH_PI * 2.0 * (rand() % 1000) / 1000.0f;
+            // orbit position
+            x[i] = r * cos(a) + normalizedCenterX * Constants::N;
+            y[i] = r * sin(a) + normalizedCenterY * Constants::N;
+            const float vecX = x[i] - normalizedCenterX * Constants::N;
+            const float vecY = y[i] - normalizedCenterY * Constants::N;
+            // orbit velocity
+            vx[i] = vecY * angularVelocity + centerOfMassVelocityX * Constants::N;
+            vy[i] = -vecX * angularVelocity + centerOfMassVelocityY * Constants::N;
+            // random color
+            renderColor[i] = 0.2f + ((rand() % 800) / 1000.0f);
+            m[i] = massPerParticle;
+        }
+        particleCounter = maxCount;
         gpuErrchk(cudaMemcpy(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(vx_d, vx.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
@@ -828,7 +862,7 @@ private:
             renderThread[i].join();
         }
         cv::Mat resized;
-        cv::resize(mat, resized, cv::Size(ww, wh), 0, 0, cv::INTER_LINEAR);
+        cv::resize(mat, resized, cv::Size(ww, wh), 0, 0, cv::INTER_LANCZOS4);
         cv::imshow("Fast Nbody", resized);
     }
     ~Universe() {
