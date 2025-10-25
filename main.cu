@@ -23,8 +23,8 @@ int main() {
         const int numParticlesPerGalaxy = 7000000;
         const float centerOfGalaxyX = 0.25f;
         const float centerOfGalaxyY = 0.25f;
-        const float angularVelocityOfGalaxy = 10.8f;
-        const float massPerParticle = 1.0f;
+        const float angularVelocityOfGalaxy = 0.3f;
+        const float massPerParticle = 0.01f;
         const float radiusOfGalaxy = 0.2f;
         const float firstGalaxyCenterOfMassVelocityX = 0.01f;
         const float firstGalaxyCenterOfMassVelocityY = 0.01f;

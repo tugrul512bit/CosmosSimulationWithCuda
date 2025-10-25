@@ -331,7 +331,7 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (Constants::N * Constants::N + numTotalThreads - 1) / numTotalThreads;
-        constexpr float cutoff = (Constants::LOCAL_CONV_WIDTH - 1) / 2;
+        constexpr float cutoff = 2.0f;//(Constants::LOCAL_CONV_WIDTH - 1) / 2;
         #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
@@ -429,7 +429,7 @@ namespace Kernels {
                     botBot = __ldca(&lattice_d[index + 2*Constants::N]);
                 }
                 // Gradient
-                const float h = 1.0f / Constants::N;
+                const float h = 1024.0f / Constants::N;
                 const float forceComponentX = (-rightRight + 8.0f * right - 8.0f * left + leftLeft) / (h * 12.0f);
                 const float forceComponentY = (-botBot + 8.0f * bot - 8.0f * top + topTop) / (h * 12.0f);
                 
@@ -487,7 +487,7 @@ namespace Kernels {
                                 forceComponentsRight.y * fractionalX * yDiff1 +
                                 forceComponentsBottom.y * xDiff1 * fractionalY +
                                 forceComponentsBottomRight.y * fractionalX * fractionalY;
-                            constexpr float dt = 0.0001f;
+                            constexpr float dt = 0.01f;
                             posX[m] = fmaf(vxr[m], dt, posX[m]);
                             posY[m] = fmaf(vyr[m], dt, posY[m]);
                             vxr[m] = fmaf(xComponent * inverseMass, dt, vxr[m]);
@@ -495,7 +495,7 @@ namespace Kernels {
                         }
                         else {
                             const float2 forceComponentsCurrent = __ldca(&latticeForceXY_d[centerIndex]);
-                            constexpr float dt = 0.0001f;
+                            constexpr float dt = 0.01f;
                             posX[m] = fmaf(vxr[m], dt, posX[m]);
                             posY[m] = fmaf(vyr[m], dt, posY[m]);
                             vxr[m] = fmaf(forceComponentsCurrent.x * inverseMass, dt, vxr[m]);
@@ -692,7 +692,6 @@ namespace Kernels {
                 localForceLatticeResult_d[index] = accumulator;
                 
             }
-            __syncthreads();
         }
     }
 }
@@ -748,11 +747,6 @@ public:
         renderColor.resize(particles);
         lattice.resize(Constants::N * Constants::N);
         mat = cv::Mat(cv::Size2i(Constants::N, Constants::N), CV_32FC1);
-        const int centerX = Constants::N / 2;
-        const int centerY = Constants::N / 2;
-        const float speed = 0.1f * ( numParticles > 10000000 ? sqrt(numParticles / 10000000.0) : 1.0);
-        int ctr = 0;
-        int ctr2 = 0;
         float nSqrt = sqrtf(numParticles);
         int nSqrtI = nSqrt;
         for (int i = 0; i < particles; i++) {
@@ -770,7 +764,7 @@ public:
             for (int ix = -HALF_WIDTH; ix <= HALF_WIDTH; ix++) {
                 const int index = ix + HALF_WIDTH + (iy + HALF_WIDTH) * Constants::LOCAL_CONV_WIDTH;
                 const double r = sqrt((double)(ix * ix + iy * iy));
-                if (r > 0.0f && r < HALF_WIDTH) {
+                if (r > 0.0 && r < HALF_WIDTH) {
                     localForceFilter[index] = 1.0f / r;
                 }
                 else {
@@ -785,7 +779,6 @@ public:
         gpuErrchk(cudaMalloc(&lattice_d, sizeof(Constants::ComplexVar) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&localForceLattice_d, sizeof(float) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&localForceLatticeResult_d, sizeof(float) * Constants::N * Constants::N));
-        
         gpuErrchk(cudaMalloc(&latticeShifted_d, sizeof(float) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&latticeShiftedForceXY_d, sizeof(float2) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&filter_d, sizeof(Constants::ComplexVar) * Constants::N * Constants::N));
