@@ -2,15 +2,15 @@
 // Change these values to utilize your gpu better (currently they are tuned for RTX4070)
 // Constants::BLOCKS
 // Constants::THREADS
-// Change this to another power-of-2 to tune accuracy of long-ranged forces. Short-ranged forces are not calculated currently (todo).
+// Change this to another power-of-2 to tune accuracy of long-ranged forces. Short-ranged forces are not calculated accurately with FFT alone, so a direct-convolution is used to partially reduce error in there.
 // Constants::N
 int main() {
     const int numNbodySimulationsPerRender = 2;
-    // 20 Bytes per particle is allocated.
+    // 100M particles require 2.5GB memory
     const int maximumParticles = 1000 * 1000 * 20;
     // cuda device index
     const int device = 0;
-    // true: more performance
+    // true = more performance + single force sampling + single mass projection + pure FFT convolution
     const bool lowAccuracy = true;
     // Window width/height
     const int w = 1340;
