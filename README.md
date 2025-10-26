@@ -1,6 +1,8 @@
 # CosmosSimulationWithCuda
 
-Simulate millions of stars using a CUDA GPU, in few miliseconds.
+Simulate 100 millions of stars using a CUDA GPU, in few miliseconds.
+
+![test](/testc.png)
 
 Algorithm: 
 - Mass values of particles are projected onto a lattice of 2048x2048 cells (this Constants::N value can be changed from header)
