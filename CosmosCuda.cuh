@@ -51,6 +51,9 @@ namespace Constants {
     using ComplexVar = float2;
     // Local convolution (short-range force calculation)
     constexpr int LOCAL_CONV_WIDTH = 33;
+
+    // Time-step
+    constexpr float dt = 0.002f;
 }
 
 namespace Kernels {
@@ -474,6 +477,8 @@ namespace Kernels {
                     if (centerX >= 1 && centerX < Constants::N - 1 && centerY >= 1 && centerY < Constants::N - 1) {
                         // Getting precalculated gradient. This should benefit from caching when many particles access same point.
                         // Then calculating interpolation for a more accurate behavior.
+                        float xComponent;
+                        float yComponent;
                         if (accuracy) {
                             const float2 forceComponentsCurrent = __ldca(&latticeForceXY_d[centerIndex]);
                             const float2 forceComponentsRight = __ldca(&latticeForceXY_d[centerIndex + 1]);
@@ -483,28 +488,38 @@ namespace Kernels {
                             const float fractionalY = posY[m] - centerY;
                             const float xDiff1 = 1.0f - fractionalX;
                             const float yDiff1 = 1.0f - fractionalY;
-                            const float xComponent = forceComponentsCurrent.x * xDiff1 * yDiff1 +
+                            xComponent = forceComponentsCurrent.x * xDiff1 * yDiff1 +
                                 forceComponentsRight.x * fractionalX * yDiff1 +
                                 forceComponentsBottom.x * xDiff1 * fractionalY +
                                 forceComponentsBottomRight.x * fractionalX * fractionalY;
-                            const float yComponent = forceComponentsCurrent.y * xDiff1 * yDiff1 +
+                            yComponent = forceComponentsCurrent.y * xDiff1 * yDiff1 +
                                 forceComponentsRight.y * fractionalX * yDiff1 +
                                 forceComponentsBottom.y * xDiff1 * fractionalY +
                                 forceComponentsBottomRight.y * fractionalX * fractionalY;
-                            constexpr float dt = 0.002f;
-                            posX[m] = fmaf(vxr[m], dt, posX[m]);
-                            posY[m] = fmaf(vyr[m], dt, posY[m]);
-                            vxr[m] = fmaf(xComponent * inverseMass, dt, vxr[m]);
-                            vyr[m] = fmaf(yComponent * inverseMass, dt, vyr[m]);
                         }
                         else {
                             const float2 forceComponentsCurrent = __ldca(&latticeForceXY_d[centerIndex]);
-                            constexpr float dt = 0.002f;
-                            posX[m] = fmaf(vxr[m], dt, posX[m]);
-                            posY[m] = fmaf(vyr[m], dt, posY[m]);
-                            vxr[m] = fmaf(forceComponentsCurrent.x * inverseMass, dt, vxr[m]);
-                            vyr[m] = fmaf(forceComponentsCurrent.y * inverseMass, dt, vyr[m]);
+                            xComponent = forceComponentsCurrent.x;
+                            yComponent = forceComponentsCurrent.y;
                         }
+                        float newX = fmaf(vxr[m], Constants::dt, posX[m]);
+                        float newY = fmaf(vyr[m], Constants::dt, posY[m]);
+                        if (newX < 2.0f) {
+                            newX += Constants::N - 4.0f;
+                        }
+                        if (newY < 2.0f) {
+                            newY += Constants::N - 4.0f;
+                        }
+                        if (newX > Constants::N - 2.0f) {
+                            newX -= Constants::N - 4.0f;
+                        }
+                        if (newY > Constants::N - 2.0f) {
+                            newY -= Constants::N - 4.0f;
+                        }
+                        posX[m] = newX;
+                        posY[m] = newY;
+                        vxr[m] = fmaf(xComponent * inverseMass, Constants::dt, vxr[m]);
+                        vyr[m] = fmaf(yComponent * inverseMass, Constants::dt, vyr[m]);
                     }
                 }
                 __stcs(reinterpret_cast<float4*>(&x[index * 4]), make_float4(posX[0], posX[1], posX[2], posX[3]));
