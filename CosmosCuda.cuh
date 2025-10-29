@@ -9,6 +9,7 @@
 #include <math.h>
 #include <vector>
 #include <iostream>
+#include <random>
 #include <mutex>
 #include <cuda_runtime.h>
 #include <cuda_pipeline.h>
@@ -37,6 +38,8 @@ namespace Constants {
 
     // For render buffer output. Asynchronously filled.
     constexpr int MAX_FRAMES_BUFFERED = 40;
+    constexpr int BLUR_R = 7;
+    constexpr int BLUR_HALF_R = (BLUR_R - 1) / 2;
 }
 namespace Kernels {
 
@@ -617,8 +620,144 @@ namespace Kernels {
         }
     }
 
+    __device__ float minVar;
+    __device__ float maxVar;
+    __global__ void k_resetMinMax() {
+        minVar = FLT_MAX;
+        maxVar = FLT_MIN;
+    }
+    __device__ static float atomicMax(float* adr, float val)
+    {
+        int* addressInt = (int*)adr;
+        int old = *addressInt;
+        int tested;
+        do {
+            tested = old;
+            old = ::atomicCAS(addressInt, tested, __float_as_int(fmaxf(val, __int_as_float(tested))));
+        } while (tested != old);
+        return __int_as_float(old);
+    }
+    __device__ static float atomicMin(float* adr, float val)
+    {
+        int* addressInt = (int*)adr;
+        int old = *addressInt;
+        int tested;
+        do {
+            tested = old;
+            old = ::atomicCAS(addressInt, tested, __float_as_int(fminf(val, __int_as_float(tested))));
+        } while (tested != old);
+        return __int_as_float(old);
+    }
+    template<int N>
+    __global__ void k_calcMinMax(float* array_d) {
+        const int thread = threadIdx.x;
+        const int block = blockIdx.x;
+        const int numBlocks = gridDim.x;
+        const int numThreads = blockDim.x;
+        const int globalThread = thread + block * numThreads;
+        const int numTotalThreads = numThreads * numBlocks;
+        const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
+        float localMin = FLT_MAX;
+        float localMax = FLT_MIN;
+        __shared__ float s_min[32];
+        __shared__ float s_max[32];
+        if (thread < 32) {
+            s_min[thread] = FLT_MAX;
+            s_max[thread] = FLT_MIN;
+        }
+        for (int ii = 0; ii < steps; ii++) {
+            const int index = ii * numTotalThreads + globalThread;
+            if (index < N * N) {
+                const float data = array_d[index];
+                if (data < localMin) {
+                    localMin = data;
+                }
+                if (data > localMax) {
+                    localMax = data;
+                }
+            }
+        }
+        const int lane = thread & 31;
+        const int warp = thread / 32;
+        float gather = __shfl_down_sync(0xFFFFFFFF, localMin, 16);
+        localMin = (lane < 16) ? ((gather < localMin) ? gather : localMin) : localMin;
+        gather = __shfl_down_sync(0xFFFFFFFF, localMin, 8);
+        localMin = (lane < 8) ? ((gather < localMin) ? gather : localMin) : localMin;
+        gather = __shfl_down_sync(0xFFFFFFFF, localMin, 4);
+        localMin = (lane < 4) ? ((gather < localMin) ? gather : localMin) : localMin;
+        gather = __shfl_down_sync(0xFFFFFFFF, localMin, 2);
+        localMin = (lane < 2) ? ((gather < localMin) ? gather : localMin) : localMin;
+        gather = __shfl_down_sync(0xFFFFFFFF, localMin, 1);
+        localMin = (lane < 1) ? ((gather < localMin) ? gather : localMin) : localMin;
+
+        gather = __shfl_down_sync(0xFFFFFFFF, localMax, 16);
+        localMax = (lane < 16) ? ((gather > localMax) ? gather : localMax) : localMax;
+        gather = __shfl_down_sync(0xFFFFFFFF, localMax, 8);
+        localMax = (lane < 8) ? ((gather > localMax) ? gather : localMax) : localMax;
+        gather = __shfl_down_sync(0xFFFFFFFF, localMax, 4);
+        localMax = (lane < 4) ? ((gather > localMax) ? gather : localMax) : localMax;
+        gather = __shfl_down_sync(0xFFFFFFFF, localMax, 2);
+        localMax = (lane < 2) ? ((gather > localMax) ? gather : localMax) : localMax;
+        gather = __shfl_down_sync(0xFFFFFFFF, localMax, 1);
+        localMax = (lane < 1) ? ((gather > localMax) ? gather : localMax) : localMax;
+
+        if (lane == 0) {
+            s_min[warp] = localMin;
+            s_max[warp] = localMax;
+        }
+        if (warp == 0) {
+            float gather = __shfl_down_sync(0xFFFFFFFF, localMin, 16);
+            localMin = (lane < 16) ? ((gather < localMin) ? gather : localMin) : localMin;
+            gather = __shfl_down_sync(0xFFFFFFFF, localMin, 8);
+            localMin = (lane < 8) ? ((gather < localMin) ? gather : localMin) : localMin;
+            gather = __shfl_down_sync(0xFFFFFFFF, localMin, 4);
+            localMin = (lane < 4) ? ((gather < localMin) ? gather : localMin) : localMin;
+            gather = __shfl_down_sync(0xFFFFFFFF, localMin, 2);
+            localMin = (lane < 2) ? ((gather < localMin) ? gather : localMin) : localMin;
+            gather = __shfl_down_sync(0xFFFFFFFF, localMin, 1);
+            localMin = (lane < 1) ? ((gather < localMin) ? gather : localMin) : localMin;
+
+            gather = __shfl_down_sync(0xFFFFFFFF, localMax, 16);
+            localMax = (lane < 16) ? ((gather > localMax) ? gather : localMax) : localMax;
+            gather = __shfl_down_sync(0xFFFFFFFF, localMax, 8);
+            localMax = (lane < 8) ? ((gather > localMax) ? gather : localMax) : localMax;
+            gather = __shfl_down_sync(0xFFFFFFFF, localMax, 4);
+            localMax = (lane < 4) ? ((gather > localMax) ? gather : localMax) : localMax;
+            gather = __shfl_down_sync(0xFFFFFFFF, localMax, 2);
+            localMax = (lane < 2) ? ((gather > localMax) ? gather : localMax) : localMax;
+            gather = __shfl_down_sync(0xFFFFFFFF, localMax, 1);
+            localMax = (lane < 1) ? ((gather > localMax) ? gather : localMax) : localMax;
+            if (lane == 0) {
+                atomicMax(&maxVar, localMax);
+                atomicMin(&minVar, localMin);
+            }
+        }
+    }
+    template<int N>
+    __global__ void k_scaleWithMinMax(float* input_d, float* output_d) {
+        const int thread = threadIdx.x;
+        const int block = blockIdx.x;
+        const int numBlocks = gridDim.x;
+        const int numThreads = blockDim.x;
+        const int globalThread = thread + block * numThreads;
+        const int numTotalThreads = numThreads * numBlocks;
+        const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
+        for (int ii = 0; ii < steps; ii++) {
+            const int index = ii * numTotalThreads + globalThread;
+            if (index < N * N) {
+                const float diff = maxVar - minVar;
+                if (diff > 0.0f) {
+                    output_d[index] = powf((input_d[index] - minVar) / (maxVar - minVar), 0.35f);
+                }
+                else {
+                    output_d[index] = 0.0f;
+                }
+            }
+        }
+    }
     // This is to capture short-range details missed by FFT.
     __constant__ float shortRangeGravKern_c[Constants::LOCAL_CONV_WIDTH * Constants::LOCAL_CONV_WIDTH];
+    __constant__ float renderBlurKern_c[Constants::BLUR_R * Constants::BLUR_R];
     constexpr int TILE_SIZE = 32;
     template< int K>
     __global__ void k_calcLocalMassConvolution(const float* const __restrict__ latticeIn_d, float* const __restrict__ latticeOut_d) {
@@ -675,7 +814,63 @@ namespace Kernels {
             }
         }
     }
+    template< int K>
+    __global__ void k_calcBlurConvolution(const float* const __restrict__ latticeIn_d, float* const __restrict__ latticeOut_d) {
+        const int threadX = threadIdx.x;
+        const int threadY = threadIdx.y;
+        const int blockX = blockIdx.x;
+        const int blockY = blockIdx.y;
+        const int numThreadsX = blockDim.x;
+        const int numThreadsY = blockDim.y;
+        const int numBlocksX = gridDim.x;
+        const int numBlocksY = gridDim.y;
+        const int numTilesPerX = Constants::N / TILE_SIZE;
+        const int numTilesPerY = Constants::N / TILE_SIZE;
+        constexpr int tileElements = (TILE_SIZE + K) * (TILE_SIZE + K);
+        const int tileLoadSteps = (tileElements + numThreadsX * numThreadsY - 1) / (numThreadsX * numThreadsY);
+        constexpr int halfK = (K - 1) / 2;
+        extern __shared__ float s_cache[];
+        for (int tileY = 0; tileY < numTilesPerY / numBlocksY; tileY++) {
+            for (int tileX = 0; tileX < numTilesPerX / numBlocksX; tileX++) {
+                const int tileXX = tileX * numBlocksX + blockX;
+                const int tileYY = tileY * numBlocksY + blockY;
+                const int tileOffset = tileXX * TILE_SIZE + tileYY * TILE_SIZE * Constants::N;
+                #pragma unroll
+                for (int load = 0; load < tileLoadSteps; load++) {
+                    const int loadT = load * numThreadsX * numThreadsY + threadX + threadY * numThreadsX;
+                    const int loadedX = loadT % (TILE_SIZE + K);
+                    const int loadedY = loadT / (TILE_SIZE + K);
+
+                    const int loaded = loadedX + loadedY * (TILE_SIZE + K);
+                    if (loadedY < (TILE_SIZE + K) && loadedX < (TILE_SIZE + K)) {
+                        if (loadedX + tileXX * TILE_SIZE - halfK >= 0 && loadedX + tileXX * TILE_SIZE - halfK < Constants::N &&
+                            loadedY + tileYY * TILE_SIZE - halfK >= 0 && loadedY + tileYY * TILE_SIZE - halfK < Constants::N) {
+                            s_cache[loaded] = __ldg(&latticeIn_d[tileOffset + loadedX - halfK + (loadedY - halfK) * Constants::N]);
+                        }
+                        else {
+                            s_cache[loaded] = 0.0f;
+                        }
+                    }
+
+                }
+                __syncthreads();
+                float acc[2] = { 0.0f, 0.0f };
+                #pragma unroll K
+                for (int iy = -halfK; iy <= halfK; iy++) {
+                    #pragma unroll K
+                    for (int ix = -halfK; ix <= halfK; ix++) {
+                        const int neighborX = ix + threadX + halfK;
+                        const int neighborY = iy + threadY + halfK;
+                        acc[(ix + halfK) & 1] = fmaf(s_cache[neighborX + neighborY * (TILE_SIZE + K)], renderBlurKern_c[ix + halfK + (iy + halfK) * K], acc[(ix + halfK) & 1]);
+                    }
+                }
+                __syncthreads();
+                latticeOut_d[tileOffset + threadX + threadY * Constants::N] = acc[0] + acc[1];
+            }
+        }
+    }
 }
+
 
 struct Universe {
 private:
@@ -688,6 +883,7 @@ private:
     int nbodyCalcCounter;
     int numNbodyStepsPerRender;
     int numParticles;
+    std::mt19937 rng;
 
     // For device
     cudaEvent_t eventStart;
@@ -702,6 +898,7 @@ private:
     float* vy_d;
     float* m_d;
     float* renderOutput_d;
+    float* renderOutput2_d;
     float* localForceLattice_d;
     float* localForceLatticeResult_d;
     int numBlocks;
@@ -736,6 +933,7 @@ public:
             vy[i] = 0;
             m[i] = 1.0f;
         }
+        // For local convolution in force calculation.
         constexpr int HALF_WIDTH = (Constants::LOCAL_CONV_WIDTH - 1) / 2;
         std::vector<float> localForceFilter(Constants::LOCAL_CONV_WIDTH * Constants::LOCAL_CONV_WIDTH);
         for (int iy = -HALF_WIDTH; iy <= HALF_WIDTH; iy++) {
@@ -750,7 +948,22 @@ public:
                 }
             }
         }
+        // For rendering.
+        std::vector<float> renderFilter(Constants::BLUR_R * Constants::BLUR_R);
+        for (int iy = -Constants::BLUR_HALF_R; iy <= Constants::BLUR_HALF_R; iy++) {
+            for (int ix = -Constants::BLUR_HALF_R; ix <= Constants::BLUR_HALF_R; ix++) {
+                const int index = ix + Constants::BLUR_HALF_R + (iy + Constants::BLUR_HALF_R) * Constants::BLUR_R;
+                const double r = sqrt((double)(ix * ix + iy * iy));
+                if (r > 1.0 && r < Constants::BLUR_HALF_R) {
+                    renderFilter[index] = 1.0f / r;
+                }
+                else {
+                    renderFilter[index] = 1.0f;
+                }
+            }
+        }
         gpuErrchk(cudaMemcpyToSymbol(Kernels::shortRangeGravKern_c, localForceFilter.data(), sizeof(float) * Constants::LOCAL_CONV_WIDTH * Constants::LOCAL_CONV_WIDTH, 0, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpyToSymbol(Kernels::renderBlurKern_c, renderFilter.data(), sizeof(float) * Constants::BLUR_R * Constants::BLUR_R, 0, cudaMemcpyHostToDevice));
         particleCounter = numParticles;
         gpuErrchk(cudaEventCreate(&eventStart));
         gpuErrchk(cudaEventCreate(&eventStop));
@@ -766,6 +979,7 @@ public:
         gpuErrchk(cudaMalloc(&vy_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMalloc(&m_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMalloc(&renderOutput_d, sizeof(float) * Constants::N * Constants::N));
+        gpuErrchk(cudaMalloc(&renderOutput2_d, sizeof(float) * Constants::N * Constants::N));
         gpuErrchk(cudaMemcpy(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(vx_d, vx.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
@@ -778,6 +992,7 @@ public:
         Kernels::k_generateFilterLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(filter_d, accuracy);
         calcFilterFft2D();
         gpuErrchk(cudaDeviceSynchronize());
+        rng = std::mt19937(static_cast<unsigned int>(std::time(0)));
     }
     // Requires same number of particles as the simulator.
     void updateParticleData(std::vector<float> sourceX, std::vector<float> sourceY, std::vector<float> sourceVX, std::vector<float> sourceVY, std::vector<float> sourceMass) {
@@ -805,9 +1020,10 @@ public:
     // Adds a galaxy with n particles, with center at (centerX, centerY) normalized coordinates.
     void addGalaxy(int n, float normalizedCenterX = 0.5f, float normalizedCenterY = 0.5f, float angularVelocity = 1.0f, float massPerParticle = 1.0f, float normalizedRadius = 0.3f, float centerOfMassVelocityX = 0.0f, float centerOfMassVelocityY = 0.0f) {
         const int maxCount = min(particleCounter + n, numParticles);
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
         for (int i = particleCounter; i < maxCount; i++) {
-            const float r = rand() % (int)(Constants::N * normalizedRadius);
-            const float a = Constants::MATH_PI * 2.0 * (rand() % 1000) / 1000.0f;
+            const float r = dist(rng) * (Constants::N * normalizedRadius);
+            const float a = Constants::MATH_PI * 2.0 * dist(rng);
             // orbit position
             x[i] = r * cos(a) + normalizedCenterX * Constants::N;
             y[i] = r * sin(a) + normalizedCenterY * Constants::N;
@@ -816,7 +1032,6 @@ public:
             // orbit velocity
             vx[i] = vecY * angularVelocity + centerOfMassVelocityX * Constants::N;
             vy[i] = -vecX * angularVelocity + centerOfMassVelocityY * Constants::N;
-            // random color
             m[i] = massPerParticle;
         }
         particleCounter = maxCount;
@@ -833,6 +1048,10 @@ private:
         Kernels::k_scatterMassOnLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, x_d, y_d, m_d, numParticles, accuracy);
         if (nbodyCalcCounter == numNbodyStepsPerRender - 1) {
             Kernels::k_getRealComponentOfLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, renderOutput_d);
+            Kernels::k_calcBlurConvolution<Constants::BLUR_R><<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::BLUR_R + Kernels::TILE_SIZE)* (Constants::BLUR_R + Kernels::TILE_SIZE) >> > (renderOutput_d, renderOutput2_d);
+            Kernels::k_resetMinMax<<<1, 1>>>();
+            Kernels::k_calcMinMax<Constants::N><<<numBlocks, Constants::THREADS>>>(renderOutput2_d);
+            Kernels::k_scaleWithMinMax<Constants::N><<<numBlocks, Constants::THREADS>>>(renderOutput2_d, renderOutput_d);
         }
         // Accuracy mode also adds a short-range force component using normal convolution.
         if (accuracy) {
@@ -884,9 +1103,9 @@ private:
         std::lock_guard<std::mutex> lg(lock);
         if (pushCtr < popCtr + Constants::MAX_FRAMES_BUFFERED - 1) {
             frames[pushCtr % Constants::MAX_FRAMES_BUFFERED].swap(frame);
+            pushCtr++;
         }
         workingTmp = working;
-        pushCtr++;
     }
     public:
     constexpr int getLatticeSize() {
@@ -965,6 +1184,7 @@ private:
         gpuErrchk(cudaFree(vy_d));
         gpuErrchk(cudaFree(m_d));
         gpuErrchk(cudaFree(renderOutput_d));
+        gpuErrchk(cudaFree(renderOutput2_d));
         gpuErrchk(cudaEventDestroy(eventStart));
         gpuErrchk(cudaEventDestroy(eventStop));
     }

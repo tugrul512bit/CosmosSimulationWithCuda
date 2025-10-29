@@ -9,7 +9,7 @@
 int main() {
     cv::namedWindow("Fast Nbody");
 
-    const int numNbodySimulationsPerRender = 2;
+    const int numNbodySimulationsPerRender = 1;
     // 100M particles require 2.5GB memory
     const int maximumParticles = 1000 * 1000 * 20;
     // cuda device index
@@ -25,7 +25,7 @@ int main() {
     if (galaxyCollisionScenario) {
         cosmos.clear();
         // Creating two galaxies in a collision course.
-        const int numParticlesPerGalaxy = 10000000;
+        const int numParticlesPerGalaxy = 1000 * 1000 * 10;
         const float centerOfGalaxyX = 0.25f;
         const float centerOfGalaxyY = 0.25f;
         const float angularVelocityOfGalaxy = 0.4f;
@@ -33,8 +33,8 @@ int main() {
         const float radiusOfGalaxy = 0.2f;
         const float firstGalaxyCenterOfMassVelocityX = 0.01f;
         const float firstGalaxyCenterOfMassVelocityY = 0.01f;
-        const float secondGalaxyCenterOfMassVelocityX = -0.01f;
-        const float secondGalaxyCenterOfMassVelocityY = -0.01f;
+        const float secondGalaxyCenterOfMassVelocityX = -0.02f;
+        const float secondGalaxyCenterOfMassVelocityY = -0.02f;
         cosmos.addGalaxy(numParticlesPerGalaxy, centerOfGalaxyX, centerOfGalaxyY, angularVelocityOfGalaxy, massPerParticle, radiusOfGalaxy, firstGalaxyCenterOfMassVelocityX, firstGalaxyCenterOfMassVelocityY);
         cosmos.addGalaxy(numParticlesPerGalaxy, centerOfGalaxyX + 0.50f, centerOfGalaxyY + 0.50f, angularVelocityOfGalaxy, massPerParticle, radiusOfGalaxy, secondGalaxyCenterOfMassVelocityX, secondGalaxyCenterOfMassVelocityY);
     }
@@ -61,8 +61,11 @@ int main() {
             }
             
             cv::Mat resized;
+            cv::Mat resizedColored;
             cv::resize(mat, resized, cv::Size(w, h), 0, 0, cv::INTER_LANCZOS4);
-            cv::imshow("Fast Nbody", resized);
+            resized.convertTo(resizedColored, CV_8UC3, 255.0f);
+            cv::applyColorMap(resizedColored, resizedColored, cv::COLORMAP_JET);
+            cv::imshow("Fast Nbody", resizedColored);
             
             // ESC = exit
             if (escTestCtr++ % 10 == 0) {
