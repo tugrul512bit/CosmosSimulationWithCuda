@@ -6,30 +6,12 @@
  * See LICENSE in the root of the project for details.
  */
 #define __CUDACC__
-#include <opencv2/opencv.hpp>
 #include <math.h>
 #include <vector>
 #include <iostream>
-#include <thread>
+#include <mutex>
 #include <cuda_runtime.h>
 #include <cuda_pipeline.h>
-#ifndef PARALLEL_FOR
-#define PARALLEL_FOR(N,O) \
-                        struct LocalClass                                                           \
-                        {                                                                           \
-                            void operator()(int i) const O                                      \
-                        } f;                                                                        \
-                        std::thread threads[N];                                                     \
-                        for(int loopCounterI=0; loopCounterI<N; loopCounterI++)                     \
-                        {                                                                           \
-                            threads[loopCounterI]=std::thread(f,loopCounterI);                      \
-                        }                                                                           \
-                        for(int loopCounterI=0; loopCounterI<N; loopCounterI++)                     \
-                        {                                                                           \
-                            threads[loopCounterI].join();                                           \
-                        }                                                                           \
-
-#endif
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort = true)
 {
@@ -39,7 +21,7 @@ inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort =
         if (abort) exit(code);
     }
 }
-
+using ComplexVar = float2;
 namespace Constants {
     // Number of threads per CUDA block. This is for 1536 resident threads per SM. For older GPUs, 512 or 1024 can be chosen.
     constexpr int THREADS = 768;
@@ -47,24 +29,25 @@ namespace Constants {
     // N is width of lattice (N x N) and can be only a power of 2. Higher value increases accuracy. For full accuracy, it needs a truncated filter lattice + closest-neighbor search algorithm (for scientific work, which also requires interpolation between cells of lattice).
     constexpr int N = 2048;
     constexpr double MATH_PI = 3.14159265358979323846;
-    using ComplexVar = float2;
     // Local convolution (short-range force calculation)
     constexpr int LOCAL_CONV_WIDTH = 33;
 
     // Time-step
     constexpr float dt = 0.002f;
-}
 
+    // For render buffer output. Asynchronously filled.
+    constexpr int MAX_FRAMES_BUFFERED = 40;
+}
 namespace Kernels {
 
-    __device__ __host__ __forceinline__ Constants::ComplexVar makeComplexVar(float x, float y) {
-        Constants::ComplexVar result;
+    __device__ __host__ __forceinline__ ComplexVar makeComplexVar(float x, float y) {
+        ComplexVar result;
         result.x = x;
         result.y = y;
         return result;
     }
-    __device__ Constants::ComplexVar wCoefficients[Constants::N * 2];
-    __device__ __forceinline__ Constants::ComplexVar d_wForNk(const double N, const double k) {
+    __device__ ComplexVar wCoefficients[Constants::N * 2];
+    __device__ __forceinline__ ComplexVar d_wForNk(const double N, const double k) {
         const double angle = (-2.0 * Constants::MATH_PI * k) / N;
         return makeComplexVar(cos(angle), -sin(angle));
     }
@@ -86,7 +69,7 @@ namespace Kernels {
         }
     }
 
-    __device__ __forceinline__ void d_calcWarpDft(Constants::ComplexVar& var, const int warpLane, const float inverseMult, Constants::ComplexVar* wCoefficients) {
+    __device__ __forceinline__ void d_calcWarpDft(ComplexVar& var, const int warpLane, const float inverseMult, ComplexVar* wCoefficients) {
         int ofs = 0;
         #pragma unroll 1
         for (int level = 1; level <= 16; level <<= 1)
@@ -94,10 +77,10 @@ namespace Kernels {
             const int level2 = level * 2;
             const int idx = (warpLane % level2);
             const bool firstHalf = idx < level;
-            const Constants::ComplexVar gather = makeComplexVar(__shfl_xor_sync(0xFFFFFFFF, var.x, level), __shfl_xor_sync(0xFFFFFFFF, var.y, level));
-            const Constants::ComplexVar select1 = firstHalf ? var : gather;
-            const Constants::ComplexVar select2 = firstHalf ? gather : var;
-            Constants::ComplexVar tmp = __ldg(&wCoefficients[ofs + idx]);
+            const ComplexVar gather = makeComplexVar(__shfl_xor_sync(0xFFFFFFFF, var.x, level), __shfl_xor_sync(0xFFFFFFFF, var.y, level));
+            const ComplexVar select1 = firstHalf ? var : gather;
+            const ComplexVar select2 = firstHalf ? gather : var;
+            ComplexVar tmp = __ldg(&wCoefficients[ofs + idx]);
             tmp.y *= inverseMult;
             float tmpX = fmaf(select2.x, tmp.x, select1.x);
             var.x = fmaf(-select2.y, tmp.y, tmpX);
@@ -120,7 +103,7 @@ namespace Kernels {
     }
     // This is used for 2D
     template<int N>
-    __global__ void k_calcFftBatched1D(Constants::ComplexVar* data, const bool inverse = false) {
+    __global__ void k_calcFftBatched1D(ComplexVar* data, const bool inverse = false) {
         const unsigned int thread = threadIdx.x;
         const unsigned int warpLane = thread & 31;
         const unsigned int block = blockIdx.x;
@@ -129,8 +112,8 @@ namespace Kernels {
         constexpr unsigned int blockSteps = (N + Constants::THREADS - 1) / Constants::THREADS;
         const float inverseMult = inverse ? -1.0f : 1.0f;
         const float divider = inverse ? N : 1.0f;
-        Constants::ComplexVar vars[blockSteps];
-        extern __shared__ Constants::ComplexVar s_coalescing[];
+        ComplexVar vars[blockSteps];
+        extern __shared__ ComplexVar s_coalescing[];
         for (unsigned int grid = 0; grid < gridSteps; grid++) {
             const unsigned int row = grid * numBlocks + block;
             if (row < N) {
@@ -172,10 +155,10 @@ namespace Kernels {
                         if (col < N) {
                             const int idx = (col % level2);
                             const bool firstHalf = idx < level;
-                            const Constants::ComplexVar gather = s_coalescing[col ^ level];
-                            const Constants::ComplexVar select1 = firstHalf ? vars[blc] : gather;
-                            const Constants::ComplexVar select2 = firstHalf ? gather : vars[blc];
-                            Constants::ComplexVar tmp = __ldg(&wCoefficients[wOfs + idx]);
+                            const ComplexVar gather = s_coalescing[col ^ level];
+                            const ComplexVar select1 = firstHalf ? vars[blc] : gather;
+                            const ComplexVar select2 = firstHalf ? gather : vars[blc];
+                            ComplexVar tmp = __ldg(&wCoefficients[wOfs + idx]);
                             tmp.y *= inverseMult;
                             float tmpX = fmaf(select2.x, tmp.x, select1.x);
                             vars[blc].x = fmaf(-select2.y, tmp.y, tmpX);
@@ -234,14 +217,14 @@ namespace Kernels {
     }
 
     template<int N>
-    __global__ void k_calcTranspose(Constants::ComplexVar* data) {
+    __global__ void k_calcTranspose(ComplexVar* data) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
         const int numThreads = blockDim.x;
         const int steps = (PAIR_LIST_SIZE + numBlocks - 1) / numBlocks;
-        __shared__ Constants::ComplexVar s_tile[SUB_MATRIX_SIZE][SUB_MATRIX_SIZE + 1];
-        __shared__ Constants::ComplexVar s_tile2[SUB_MATRIX_SIZE][SUB_MATRIX_SIZE + 1];
+        __shared__ ComplexVar s_tile[SUB_MATRIX_SIZE][SUB_MATRIX_SIZE + 1];
+        __shared__ ComplexVar s_tile2[SUB_MATRIX_SIZE][SUB_MATRIX_SIZE + 1];
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numBlocks + block;
             if (index < PAIR_LIST_SIZE) {
@@ -282,14 +265,14 @@ namespace Kernels {
         }
     }
     template<int N>
-    __global__ void k_calcTransposeDiagonals(Constants::ComplexVar* data) {
+    __global__ void k_calcTransposeDiagonals(ComplexVar* data) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
         const int numThreads = blockDim.x;
 
         const int steps = (NUM_SUB_MATRICES_PER_DIMENSION + numBlocks - 1) / numBlocks;
-        __shared__ Constants::ComplexVar s_tile[SUB_MATRIX_SIZE][SUB_MATRIX_SIZE + 1];
+        __shared__ ComplexVar s_tile[SUB_MATRIX_SIZE][SUB_MATRIX_SIZE + 1];
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numBlocks + block;
             if (index < NUM_SUB_MATRICES_PER_DIMENSION) {
@@ -325,7 +308,7 @@ namespace Kernels {
         }
     }
     template<int N>
-    __global__ void k_generateFilterLattice(Constants::ComplexVar* data, bool accuracy) {
+    __global__ void k_generateFilterLattice(ComplexVar* data, bool accuracy) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -363,7 +346,7 @@ namespace Kernels {
         }
     }
     template<int N>
-    __global__ void k_multElementwiseLatticeFilter(Constants::ComplexVar* data, Constants::ComplexVar* data2) {
+    __global__ void k_multElementwiseLatticeFilter(ComplexVar* data, ComplexVar* data2) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -531,7 +514,7 @@ namespace Kernels {
 
 
     template<int N>
-    __global__ void k_clearLattice(Constants::ComplexVar* lattice_d) {
+    __global__ void k_clearLattice(ComplexVar* lattice_d) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -543,30 +526,14 @@ namespace Kernels {
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < Constants::N * Constants::N) {
-                lattice_d[index] = Constants::ComplexVar{ 0.0f, 0.0f };
+                lattice_d[index] = ComplexVar{ 0.0f, 0.0f };
             }
         }
     }
-    template<int N>
-    __global__ void k_clearLatticeForRender(float* lattice_d) {
-        const int thread = threadIdx.x;
-        const int block = blockIdx.x;
-        const int numBlocks = gridDim.x;
-        const int numThreads = blockDim.x;
-        const int globalThread = thread + block * numThreads;
-        const int numTotalThreads = numThreads * numBlocks;
-        const int steps = (Constants::N * Constants::N + numTotalThreads - 1) / numTotalThreads;
-        #pragma unroll
-        for (int ii = 0; ii < steps; ii++) {
-            const int index = ii * numTotalThreads + globalThread;
-            if (index < Constants::N * Constants::N) {
-                lattice_d[index] = 0.0f;
-            }
-        }
-    }
+
     // Optionally shifts and adds local values to global.
     template<int N>
-    __global__ void k_shiftLattice(Constants::ComplexVar* lattice_d, float* latticeLocal_d, float* latticeShifted_d, bool accuracy) {
+    __global__ void k_shiftLattice(ComplexVar* lattice_d, float* latticeLocal_d, float* latticeShifted_d, bool accuracy) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -593,7 +560,7 @@ namespace Kernels {
         }
     }
     template<int N>
-    __global__ void k_scatterMassOnLattice(Constants::ComplexVar* lattice_d, const float* x, const float* y, const float* m, const int numParticles, bool accuracy) {
+    __global__ void k_scatterMassOnLattice(ComplexVar* lattice_d, const float* x, const float* y, const float* m, const int numParticles, bool accuracy) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -634,29 +601,7 @@ namespace Kernels {
     }
 
     template<int N>
-    __global__ void k_scatterMassOnLatticeForRender(float* lattice_d, const float* x, const float* y, const int numParticles, const float* renderColor_d, bool colorOnly = false) {
-        const int thread = threadIdx.x;
-        const int block = blockIdx.x;
-        const int numBlocks = gridDim.x;
-        const int numThreads = blockDim.x;
-        const int globalThread = thread + block * numThreads;
-        const int numTotalThreads = numThreads * numBlocks;
-        const int steps = (numParticles + numTotalThreads - 1) / numTotalThreads;
-        #pragma unroll
-        for (int ii = 0; ii < steps; ii++) {
-            const int index = ii * numTotalThreads + globalThread;
-            if (index < numParticles) {
-                const int xi = x[index];
-                const int yi = y[index];
-                if (xi >= 0 && xi < Constants::N && yi >= 0 && yi < Constants::N) {
-                    atomicAdd(&lattice_d[xi + yi * Constants::N], renderColor_d[index]);
-                }
-            }
-        }
-    }
-
-    template<int N>
-    __global__ void k_cloneLatticeForShortRangeCalc(Constants::ComplexVar* lattice_d, float* localForceLattice_d) {
+    __global__ void k_getRealComponentOfLattice(ComplexVar* lattice_d, float* localForceLattice_d) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -738,41 +683,38 @@ private:
     std::vector<float> x, y;
     std::vector<float> vx, vy;
     std::vector<float> m;
-    std::vector<float> lattice;
     std::vector<float> renderColor;
     int particleCounter;
-
-    // For OpenCV
-    cv::Mat mat;
+    int nbodyCalcCounter;
+    int numNbodyStepsPerRender;
     int numParticles;
 
     // For device
     cudaEvent_t eventStart;
     cudaEvent_t eventStop;
-    Constants::ComplexVar* lattice_d;
+    ComplexVar* lattice_d;
     float* latticeShifted_d;
     float2* latticeShiftedForceXY_d;
-    Constants::ComplexVar* filter_d;
+    ComplexVar* filter_d;
     float* x_d;
     float* y_d;
     float* vx_d;
     float* vy_d;
     float* m_d;
-    float* renderColor_d;
+    float* renderOutput_d;
     float* localForceLattice_d;
     float* localForceLatticeResult_d;
     int numBlocks;
+    int cudaDeviceIndex;
     // Accuracy setting: increases accuracy of mass projections and force sampling at cost of 50% performance
     bool accuracy;
-    // Window stats
-    int ww;
-    int wh;
 public:
-    Universe(int particles, int cudaDevice, bool lowAccuracy, int windowWidthPixels, int windowHeightPixels) {
-        ww = windowWidthPixels;
-        wh = windowHeightPixels;
+    Universe(int particles, int cudaDevice, bool lowAccuracy, int numStepsPerRender) {
         accuracy = !lowAccuracy;
         particleCounter = 0;
+        nbodyCalcCounter = 0;
+        numNbodyStepsPerRender = numStepsPerRender;
+        cudaDeviceIndex = cudaDevice;
         gpuErrchk(cudaSetDevice(cudaDevice));
         cudaDeviceProp prop;
         gpuErrchk(cudaGetDeviceProperties(&prop, cudaDevice));
@@ -785,9 +727,6 @@ public:
         y.resize(particles);
         vy.resize(particles);
         m.resize(particles);
-        renderColor.resize(particles);
-        lattice.resize(Constants::N * Constants::N);
-        mat = cv::Mat(cv::Size2i(Constants::N, Constants::N), CV_32FC1);
         float nSqrt = sqrtf(numParticles);
         int nSqrtI = nSqrt;
         for (int i = 0; i < particles; i++) {
@@ -795,8 +734,6 @@ public:
             y[i] = (rand() % Constants::N);
             vx[i] = 0;
             vy[i] = 0;
-            // random color
-            renderColor[i] = 0.2f + ((rand() % 800) / 1000.0f);
             m[i] = 1.0f;
         }
         constexpr int HALF_WIDTH = (Constants::LOCAL_CONV_WIDTH - 1) / 2;
@@ -817,32 +754,30 @@ public:
         particleCounter = numParticles;
         gpuErrchk(cudaEventCreate(&eventStart));
         gpuErrchk(cudaEventCreate(&eventStop));
-        gpuErrchk(cudaMalloc(&lattice_d, sizeof(Constants::ComplexVar) * Constants::N * Constants::N));
+        gpuErrchk(cudaMalloc(&lattice_d, sizeof(ComplexVar) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&localForceLattice_d, sizeof(float) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&localForceLatticeResult_d, sizeof(float) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&latticeShifted_d, sizeof(float) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&latticeShiftedForceXY_d, sizeof(float2) * Constants::N * Constants::N));
-        gpuErrchk(cudaMalloc(&filter_d, sizeof(Constants::ComplexVar) * Constants::N * Constants::N));
+        gpuErrchk(cudaMalloc(&filter_d, sizeof(ComplexVar) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&x_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMalloc(&y_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMalloc(&vx_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMalloc(&vy_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMalloc(&m_d, sizeof(float) * numParticles));
-        gpuErrchk(cudaMalloc(&renderColor_d, sizeof(float) * numParticles));
+        gpuErrchk(cudaMalloc(&renderOutput_d, sizeof(float) * Constants::N * Constants::N));
         gpuErrchk(cudaMemcpy(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(vx_d, vx.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(vy_d, vy.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(m_d, m.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(renderColor_d, renderColor.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         cudaFuncSetAttribute(Kernels::k_calcFftBatched1D<Constants::N>, cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxShared);
-        cudaFuncSetAttribute(Kernels::k_calcFftBatched1D<Constants::N>, cudaFuncAttributeMaxDynamicSharedMemorySize, Constants::N * sizeof(Constants::ComplexVar));
+        cudaFuncSetAttribute(Kernels::k_calcFftBatched1D<Constants::N>, cudaFuncAttributeMaxDynamicSharedMemorySize, Constants::N * sizeof(ComplexVar));
         Kernels::k_fillCoefficientArray<Constants::N><<<1, 1024 >>>();
         Kernels::k_fillPairIndexList<Constants::N><<<numBlocks, Constants::THREADS>>>();
         Kernels::k_generateFilterLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(filter_d, accuracy);
         calcFilterFft2D();
         gpuErrchk(cudaDeviceSynchronize());
-        cv::namedWindow("Fast Nbody");
     }
     // Requires same number of particles as the simulator.
     void updateParticleData(std::vector<float> sourceX, std::vector<float> sourceY, std::vector<float> sourceVX, std::vector<float> sourceVY, std::vector<float> sourceMass) {
@@ -882,7 +817,6 @@ public:
             vx[i] = vecY * angularVelocity + centerOfMassVelocityX * Constants::N;
             vy[i] = -vecX * angularVelocity + centerOfMassVelocityY * Constants::N;
             // random color
-            renderColor[i] = 0.2f + ((rand() % 800) / 1000.0f);
             m[i] = massPerParticle;
         }
         particleCounter = maxCount;
@@ -892,42 +826,34 @@ public:
         gpuErrchk(cudaMemcpy(vy_d, vy.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(m_d, m.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
     }
-    void startBenchmark() {
-        gpuErrchk(cudaEventRecord(eventStart));
-    }
 private:
     // todo: scatter on 9 cells per mass to improve accuracy more.
-    void scatterMassOnLattice(bool renderOnly = false) {
-        if (renderOnly) {
-            Kernels::k_clearLatticeForRender<Constants::N><<<numBlocks, Constants::THREADS>>>(latticeShifted_d);
-            Kernels::k_scatterMassOnLatticeForRender<Constants::N><<<numBlocks, Constants::THREADS>>> (latticeShifted_d, x_d, y_d, numParticles, renderColor_d, renderOnly);
+    void scatterMassOnLattice() {
+        Kernels::k_clearLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d);
+        Kernels::k_scatterMassOnLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, x_d, y_d, m_d, numParticles, accuracy);
+        if (nbodyCalcCounter == numNbodyStepsPerRender - 1) {
+            Kernels::k_getRealComponentOfLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, renderOutput_d);
         }
-        else {
-            Kernels::k_clearLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d);
-            Kernels::k_scatterMassOnLattice<Constants::N><<<numBlocks, Constants::THREADS >> > (lattice_d, x_d, y_d, m_d, numParticles, accuracy);
-            // Accuracy mode also adds a short-range force component using normal convolution.
-            if (accuracy) {
-                Kernels::k_cloneLatticeForShortRangeCalc<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, localForceLattice_d);
-                Kernels::k_calcLocalMassConvolution<Constants::LOCAL_CONV_WIDTH> <<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE) >> > (localForceLattice_d, localForceLatticeResult_d);
-            }
+        // Accuracy mode also adds a short-range force component using normal convolution.
+        if (accuracy) {
+            Kernels::k_getRealComponentOfLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, localForceLattice_d);
+            Kernels::k_calcLocalMassConvolution<Constants::LOCAL_CONV_WIDTH> <<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE) >> > (localForceLattice_d, localForceLatticeResult_d);
         }
-
-
     }
     void calcLatticeFft2D() {
-        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(Constants::ComplexVar)>>>(lattice_d, false);
+        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar)>>>(lattice_d, false);
         Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS>>> (lattice_d);
         Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS >> > (lattice_d);
-        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(Constants::ComplexVar)>>>(lattice_d, false);
+        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar)>>>(lattice_d, false);
         Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS>>> (lattice_d);
         Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d);
 
     }
     void calcFilterFft2D() {
-        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(Constants::ComplexVar)>>>(filter_d, false);
+        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar)>>>(filter_d, false);
         Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS>>>(filter_d);
         Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS>>>(filter_d);
-        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(Constants::ComplexVar)>>>(filter_d, false);
+        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar)>>>(filter_d, false);
         Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS>>>(filter_d);
         Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS>>>(filter_d);
 
@@ -936,10 +862,10 @@ private:
         Kernels::k_multElementwiseLatticeFilter<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, filter_d);
     }
     void calcLatticeIfft2D() {
-        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(Constants::ComplexVar)>>>(lattice_d, true);
+        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar)>>>(lattice_d, true);
         Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d);
         Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d);
-        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(Constants::ComplexVar)>>>(lattice_d, true);
+        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar)>>>(lattice_d, true);
         Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d);
         Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d);
     }
@@ -948,51 +874,85 @@ private:
         Kernels::k_calcGradientLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(latticeShifted_d, latticeShiftedForceXY_d);
         Kernels::k_forceMultiSampling<Constants::N><<<numBlocks, Constants::THREADS>>>(latticeShiftedForceXY_d, x_d, y_d, vx_d, vy_d, m_d, numParticles, accuracy);
     }
+    std::mutex lock;
+    std::vector<std::vector<float>> frames;
+    std::thread computeThread;
+    int pushCtr;
+    int popCtr;
+    bool working;
+    void pushFrame(std::vector<float>& frame, bool& workingTmp) {
+        std::lock_guard<std::mutex> lg(lock);
+        if (pushCtr < popCtr + Constants::MAX_FRAMES_BUFFERED - 1) {
+            frames[pushCtr % Constants::MAX_FRAMES_BUFFERED].swap(frame);
+        }
+        workingTmp = working;
+        pushCtr++;
+    }
     public:
-    void nBody() {
-        scatterMassOnLattice();
-        calcLatticeFft2D();
-        multiplyLatticeFilterElementwise();
-        calcLatticeIfft2D();
-        multiSampleForces();
-    }
-    void stopBenchmark() {
-        gpuErrchk(cudaEventRecord(eventStop));
-    }
-    void sync(int numStepsComputed) {
-        gpuErrchk(cudaDeviceSynchronize());
-        float milliseconds;
-        gpuErrchk(cudaEventElapsedTime(&milliseconds, eventStart, eventStop));
-        std::cout << "CUDA Nbody pipeline: " << milliseconds / numStepsComputed << " milliseconds per step" << std::endl;
+    constexpr int getLatticeSize() {
+        return Constants::N;
     }
 
-    void render() {
-        scatterMassOnLattice(true);
-        gpuErrchk(cudaDeviceSynchronize());
-        mat.setTo(cv::Scalar(0.0f));
-
-        gpuErrchk(cudaMemcpy(lattice.data(), latticeShifted_d, sizeof(float) * Constants::N * Constants::N, cudaMemcpyDeviceToHost));
-        std::vector<std::thread> renderThread;
-        const int nThr = 4;
-        for (int i = 0; i < nThr; i++) {
-            const int iClone = i;
-            renderThread.emplace_back([&, iClone]() {
-                const int chunkSize = (Constants::N * Constants::N) / nThr;
-                for (int j = iClone * chunkSize; j < iClone * chunkSize + chunkSize; j++) {
-                    const auto data = lattice[j];
-                    mat.at<float>(j) = (data > 1.0f ? 1.0f : data);
+    void nBodyStartGeneratingFrames() {
+        {
+            std::lock_guard<std::mutex> lg(lock);
+            pushCtr = 0;
+            popCtr = 0;
+            frames.resize(Constants::MAX_FRAMES_BUFFERED);
+            for (int i = 0; i < Constants::MAX_FRAMES_BUFFERED; i++) {
+                // +1 for elapsed milliseconds data.
+                frames[i].resize(Constants::N * Constants::N + 1);
+            }
+            working = true;
+        }
+        
+        computeThread = std::thread([&]() {
+            static std::vector<float> frame(Constants::N * Constants::N + 1);
+            gpuErrchk(cudaSetDevice(cudaDeviceIndex));
+            bool workingTmp = true;
+            while (workingTmp) {
+                if (nbodyCalcCounter == 0) {
+                    gpuErrchk(cudaEventRecord(eventStart));
                 }
-            });
+                scatterMassOnLattice();
+                calcLatticeFft2D();
+                multiplyLatticeFilterElementwise();
+                calcLatticeIfft2D();
+                multiSampleForces();
+                nbodyCalcCounter++;
+                if (nbodyCalcCounter == numNbodyStepsPerRender) {
+                    nbodyCalcCounter = 0;
+                    gpuErrchk(cudaEventRecord(eventStop));
+                    gpuErrchk(cudaDeviceSynchronize());
+                    float milliseconds;
+                    gpuErrchk(cudaEventElapsedTime(&milliseconds, eventStart, eventStop));
+                    gpuErrchk(cudaMemcpy(frame.data(), renderOutput_d, sizeof(float) * Constants::N * Constants::N, cudaMemcpyDeviceToHost));
+                    frame[Constants::N * Constants::N] = milliseconds / numNbodyStepsPerRender;
+                    pushFrame(frame, workingTmp);
+                }
+            }
+        });
+    }
+    // returns frame pixels + last element as elapsed milliseconds per time-step.
+    std::vector<float>& popFrame() {
+        static std::vector<float> result(Constants::N * Constants::N + 1);
+        {
+            std::lock_guard<std::mutex> lg(lock);
+            if (popCtr < pushCtr) {
+                result.swap(frames[popCtr % Constants::MAX_FRAMES_BUFFERED]);
+                popCtr++;
+            }
         }
-        for (int i = 0; i < nThr; i++) {
-            renderThread[i].join();
+        return result;
+    }
+    void nBodyStop() {
+        {
+            std::lock_guard<std::mutex> lg(lock);
+            working = false;
         }
-        cv::Mat resized;
-        cv::resize(mat, resized, cv::Size(ww, wh), 0, 0, cv::INTER_LANCZOS4);
-        cv::imshow("Fast Nbody", resized);
+        computeThread.join();
     }
     ~Universe() {
-        cv::destroyAllWindows();
         gpuErrchk(cudaFree(lattice_d));
         gpuErrchk(cudaFree(localForceLattice_d));
         gpuErrchk(cudaFree(localForceLatticeResult_d));
@@ -1004,7 +964,7 @@ private:
         gpuErrchk(cudaFree(vx_d));
         gpuErrchk(cudaFree(vy_d));
         gpuErrchk(cudaFree(m_d));
-        gpuErrchk(cudaFree(renderColor_d));
+        gpuErrchk(cudaFree(renderOutput_d));
         gpuErrchk(cudaEventDestroy(eventStart));
         gpuErrchk(cudaEventDestroy(eventStop));
     }
