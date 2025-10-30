@@ -38,7 +38,7 @@ namespace Constants {
 
     // For render buffer output. Asynchronously filled.
     constexpr int MAX_FRAMES_BUFFERED = 40;
-    constexpr int BLUR_R = 7;
+    constexpr int BLUR_R = 5;
     constexpr int BLUR_HALF_R = (BLUR_R - 1) / 2;
 }
 namespace Kernels {
