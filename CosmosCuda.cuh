@@ -28,7 +28,7 @@ namespace Constants {
     constexpr int THREADS = 768;
     // FFT uses these (long-range force calculation)
     // N is width of lattice (N x N) and can be only a power of 2. Higher value increases accuracy at the cost of performance.
-    constexpr int N = 2048;
+    constexpr int N = 4096;
     constexpr double MATH_PI = 3.14159265358979323846;
     // Local convolution (short-range force calculation) to increase accuracy for high-accuracy mode. Only computes closest masses within LOCAL_CONV_WIDTH / 2 range.
     constexpr int LOCAL_CONV_WIDTH = 33;

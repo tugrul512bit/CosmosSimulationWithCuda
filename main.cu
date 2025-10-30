@@ -9,14 +9,14 @@
 int main() {
     cv::namedWindow("Fast Nbody");
 
-    const int numNbodySimulationsPerRender = 5;
+    const int numNbodySimulationsPerRender = 2;
     // 100M particles require 2.5GB memory
     const int maximumParticles = 1000 * 1000 * 24;
     // cuda device index
-    const int device = 0;
+    const int device = 1;
     // true = more performance + single force sampling + single mass projection + pure FFT convolution
     // false = multi sampled forces per particle + multi-point mass projection per particle + FFT + local convolution
-    const bool lowAccuracy = true;
+    const bool lowAccuracy = false;
     // Window width/height
     const int w = 1340;
     const int h = 1340;
@@ -54,12 +54,8 @@ int main() {
             mat.setTo(cv::Scalar(0.0f));
             // Copy lattice to opencv mat.
             const int n = frame.size() - 1;
-            
-            for (int j = 0; j < n; j++) {
-                const auto data = frame[j];
-                mat.at<float>(j) = (data > 1.0f ? 1.0f : data);
-            }
-            
+            memcpy(mat.data, frame.data(), sizeof(float) * n);
+           
             cv::Mat resized;
             cv::Mat resizedColored;
             cv::resize(mat, resized, cv::Size(w, h), 0, 0, cv::INTER_LANCZOS4);
@@ -68,10 +64,8 @@ int main() {
             cv::imshow("Fast Nbody", resizedColored);
             
             // ESC = exit
-            if (escTestCtr++ % 10 == 0) {
-                if (cv::waitKey(1) == 27) {
+            if (cv::waitKey(1) == 27) {
                     break;
-                }
             }
         }
     }
