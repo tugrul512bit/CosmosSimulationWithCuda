@@ -27,13 +27,13 @@ namespace Constants {
     // Number of threads per CUDA block. This is for 1536 resident threads per SM. For older GPUs, 512 or 1024 can be chosen.
     constexpr int THREADS = 768;
     // FFT uses these (long-range force calculation)
-    // N is width of lattice (N x N) and can be only a power of 2. Higher value increases accuracy. For full accuracy, it needs a truncated filter lattice + closest-neighbor search algorithm (for scientific work, which also requires interpolation between cells of lattice).
+    // N is width of lattice (N x N) and can be only a power of 2. Higher value increases accuracy at the cost of performance.
     constexpr int N = 2048;
     constexpr double MATH_PI = 3.14159265358979323846;
-    // Local convolution (short-range force calculation)
+    // Local convolution (short-range force calculation) to increase accuracy for high-accuracy mode. Only computes closest masses within LOCAL_CONV_WIDTH / 2 range.
     constexpr int LOCAL_CONV_WIDTH = 33;
 
-    // Time-step
+    // Time-step of simulation. Lower values increase accuracy.
     constexpr float dt = 0.002f;
 
     // For render buffer output. Asynchronously filled.
@@ -733,6 +733,17 @@ namespace Kernels {
             }
         }
     }
+    __device__ float smoothMin;
+    __device__ float smoothMax;
+    __global__ void k_initSmoothMinMax() {
+        smoothMin = 0.0f;
+        smoothMax = 0.0f;
+    }
+    __global__ void k_smoothMinMax() {
+        constexpr float alpha = 0.15f;
+        smoothMin = (1.0f - alpha) * smoothMin + alpha * minVar;
+        smoothMax = (1.0f - alpha) * smoothMax + alpha * maxVar;
+    }
     template<int N>
     __global__ void k_scaleWithMinMax(float* input_d, float* output_d) {
         const int thread = threadIdx.x;
@@ -745,9 +756,9 @@ namespace Kernels {
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < N * N) {
-                const float diff = maxVar - minVar;
+                const float diff = smoothMax - smoothMin;
                 if (diff > 0.0f) {
-                    output_d[index] = powf((input_d[index] - minVar) / (maxVar - minVar), 0.35f);
+                    output_d[index] = powf((input_d[index] - smoothMin) / diff, 0.25f);
                 }
                 else {
                     output_d[index] = 0.0f;
@@ -990,6 +1001,7 @@ public:
         Kernels::k_fillCoefficientArray<Constants::N><<<1, 1024 >>>();
         Kernels::k_fillPairIndexList<Constants::N><<<numBlocks, Constants::THREADS>>>();
         Kernels::k_generateFilterLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(filter_d, accuracy);
+        Kernels::k_initSmoothMinMax<<<1, 1>>>();
         calcFilterFft2D();
         gpuErrchk(cudaDeviceSynchronize());
         rng = std::mt19937(static_cast<unsigned int>(std::time(0)));
@@ -1051,6 +1063,7 @@ private:
             Kernels::k_calcBlurConvolution<Constants::BLUR_R><<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::BLUR_R + Kernels::TILE_SIZE)* (Constants::BLUR_R + Kernels::TILE_SIZE) >> > (renderOutput_d, renderOutput2_d);
             Kernels::k_resetMinMax<<<1, 1>>>();
             Kernels::k_calcMinMax<Constants::N><<<numBlocks, Constants::THREADS>>>(renderOutput2_d);
+            Kernels::k_smoothMinMax<<<1, 1>>>();
             Kernels::k_scaleWithMinMax<Constants::N><<<numBlocks, Constants::THREADS>>>(renderOutput2_d, renderOutput_d);
         }
         // Accuracy mode also adds a short-range force component using normal convolution.

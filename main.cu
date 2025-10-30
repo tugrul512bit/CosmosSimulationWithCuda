@@ -1,17 +1,17 @@
 ﻿#include "CosmosCuda.cuh"
 #include <opencv2/opencv.hpp>
 #include <thread>
-// Change these values to utilize your gpu better (currently they are tuned for RTX4070)
-// Constants::BLOCKS
+// Constants that can be changed:
 // Constants::THREADS
-// Change this to another power-of-2 to tune accuracy of long-ranged forces. Short-ranged forces are not calculated accurately with FFT alone, so a direct-convolution is used to partially reduce error in there.
-// Constants::N
+// Constants::dt
+// Constants::MAX_FRAMES_BUFFERED
+
 int main() {
     cv::namedWindow("Fast Nbody");
 
-    const int numNbodySimulationsPerRender = 1;
+    const int numNbodySimulationsPerRender = 5;
     // 100M particles require 2.5GB memory
-    const int maximumParticles = 1000 * 1000 * 20;
+    const int maximumParticles = 1000 * 1000 * 24;
     // cuda device index
     const int device = 0;
     // true = more performance + single force sampling + single mass projection + pure FFT convolution
@@ -25,10 +25,10 @@ int main() {
     if (galaxyCollisionScenario) {
         cosmos.clear();
         // Creating two galaxies in a collision course.
-        const int numParticlesPerGalaxy = 1000 * 1000 * 10;
+        const int numParticlesPerGalaxy = 1000 * 1000 * 12;
         const float centerOfGalaxyX = 0.25f;
         const float centerOfGalaxyY = 0.25f;
-        const float angularVelocityOfGalaxy = 0.4f;
+        const float angularVelocityOfGalaxy = 0.7f;
         const float massPerParticle = 0.01f;
         const float radiusOfGalaxy = 0.2f;
         const float firstGalaxyCenterOfMassVelocityX = 0.01f;
