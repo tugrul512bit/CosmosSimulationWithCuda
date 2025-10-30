@@ -13,7 +13,7 @@ int main() {
     // 100M particles require 2.5GB memory
     const int maximumParticles = 1000 * 1000 * 24;
     // cuda device index
-    const int device = 1;
+    const int device = 0;
     // true = more performance + single force sampling + single mass projection + pure FFT convolution
     // false = multi sampled forces per particle + multi-point mass projection per particle + FFT + local convolution
     const bool lowAccuracy = false;
