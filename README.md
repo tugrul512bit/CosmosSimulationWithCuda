@@ -1,7 +1,10 @@
 # CosmosSimulationWithCuda
 
-Simulate 100 millions of stars using a CUDA GPU, in few miliseconds.
+Real-time N-body algorithm with 250 million particles, accelerated with CUDA.
 
+![time 1](/t1.png)
+![time 2](/t2.png)
+![time 3](/t3.png)
 ![test](/testc.png)
 
 Algorithm: 
