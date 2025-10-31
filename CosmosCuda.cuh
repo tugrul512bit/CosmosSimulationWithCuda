@@ -26,6 +26,7 @@ using ComplexVar = float2;
 namespace Constants {
     // Number of threads per CUDA block. This is for 1536 resident threads per SM. For older GPUs, 512 or 1024 can be chosen.
     constexpr int THREADS = 768;
+
     // FFT uses these (long-range force calculation)
     // N is width of lattice (N x N) and can be only a power of 2. Higher value increases accuracy at the cost of performance.
     constexpr int N = 2048;
@@ -514,7 +515,7 @@ namespace Kernels {
 
 
     template<int N>
-    __global__ void k_clearLattice(ComplexVar* lattice_d) {
+    __global__ void k_clearAccumulator(float* const __restrict__ accumulator_d) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -526,7 +527,7 @@ namespace Kernels {
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < N * N) {
-                lattice_d[index] = ComplexVar{ 0.0f, 0.0f };
+                accumulator_d[index] = 0.0f;
             }
         }
     }
@@ -559,7 +560,7 @@ namespace Kernels {
         }
     }
     template<int N>
-    __global__ void k_scatterMassOnLattice(ComplexVar* lattice_d, const float* x, const float* y, const float* m, const int numParticles, bool accuracy) {
+    __global__ void k_scatterMassOnAccumulator(float* const __restrict__ accumulator_d, const float* x, const float* y, const float* m, const int numParticles, bool accuracy) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -567,6 +568,7 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (numParticles + numTotalThreads - 1) / numTotalThreads;
+        const int balancedIndex = thread & 1;
         #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
@@ -587,18 +589,34 @@ namespace Kernels {
                     const float weightBottomRight = fractionalX * fractionalY;
                     // Optional weighted scattering for more accuracy.
                     if (accuracy) {
-                        atomicAdd(&lattice_d[xi + yi * N].x, weightCurrent * mass);
-                        atomicAdd(&lattice_d[1 + xi + yi * N].x, weightRight * mass);
-                        atomicAdd(&lattice_d[xi + (yi + 1) * N].x, weightBottom * mass);
-                        atomicAdd(&lattice_d[1 + xi + (yi + 1) * N].x, weightBottomRight * mass);
+                        atomicAdd(&accumulator_d[xi + yi * N], weightCurrent * mass);
+                        atomicAdd(&accumulator_d[1 + xi + yi * N], weightRight * mass);
+                        atomicAdd(&accumulator_d[xi + (yi + 1) * N], weightBottom * mass);
+                        atomicAdd(&accumulator_d[1 + xi + (yi + 1) * N], weightBottomRight * mass);
                     } else {
-                        atomicAdd(&lattice_d[xi + yi * N].x, mass);
+                        atomicAdd(&accumulator_d[xi + yi * N], mass);
                     }
                 }
             }
         }
     }
-
+    template<int N>
+    __global__ void k_copyAccumulatorIntoLattice(float* const __restrict__ accumulator_d, ComplexVar* const __restrict__ lattice_d) {
+        const int thread = threadIdx.x;
+        const int block = blockIdx.x;
+        const int numBlocks = gridDim.x;
+        const int numThreads = blockDim.x;
+        const int globalThread = thread + block * numThreads;
+        const int numTotalThreads = numThreads * numBlocks;
+        const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
+        #pragma unroll
+        for (int ii = 0; ii < steps; ii++) {
+            const int index = ii * numTotalThreads + globalThread;
+            if (index < N * N) {
+                lattice_d[index] = makeComplexVar(accumulator_d[index], 0.0f);
+            }
+        }
+    }
     template<int N>
     __global__ void k_getRealComponentOfLattice(ComplexVar* lattice_d, float* localForceLattice_d) {
         const int thread = threadIdx.x;
@@ -894,6 +912,7 @@ private:
     cudaEvent_t eventStart;
     cudaEvent_t eventStop;
     ComplexVar* lattice_d;
+    float* accumulator_d;
     float* latticeShifted_d;
     float2* latticeShiftedForceXY_d;
     ComplexVar* filter_d;
@@ -985,6 +1004,7 @@ public:
         gpuErrchk(cudaMalloc(&vx_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMalloc(&vy_d, sizeof(float) * numParticles));
         gpuErrchk(cudaMalloc(&m_d, sizeof(float) * numParticles));
+        gpuErrchk(cudaMalloc(&accumulator_d, sizeof(float) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&renderOutput_d, sizeof(float) * Constants::N * Constants::N));
         gpuErrchk(cudaMalloc(&renderOutput2_d, sizeof(float) * Constants::N * Constants::N));
         gpuErrchk(cudaMemcpy(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
@@ -1069,8 +1089,9 @@ public:
 private:
     // todo: scatter on 9 cells per mass to improve accuracy more.
     void scatterMassOnLattice() {
-        Kernels::k_clearLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d);
-        Kernels::k_scatterMassOnLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, x_d, y_d, m_d, numParticles, accuracy);
+        Kernels::k_clearAccumulator<Constants::N><<<numBlocks, Constants::THREADS>>>(accumulator_d);
+        Kernels::k_scatterMassOnAccumulator<Constants::N><<<numBlocks, Constants::THREADS>>>(accumulator_d, x_d, y_d, m_d, numParticles, accuracy);
+        Kernels::k_copyAccumulatorIntoLattice<Constants::N> << <numBlocks, Constants::THREADS >> > (accumulator_d, lattice_d);
         if (nbodyCalcCounter == numNbodyStepsPerRender - 1) {
             Kernels::k_getRealComponentOfLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, renderOutput_d);
             Kernels::k_calcBlurConvolution<Constants::BLUR_R, Constants::N><<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::BLUR_R + Kernels::TILE_SIZE)* (Constants::BLUR_R + Kernels::TILE_SIZE) >> > (renderOutput_d, renderOutput2_d);
@@ -1199,6 +1220,7 @@ private:
     }
     ~Universe() {
         gpuErrchk(cudaFree(lattice_d));
+        gpuErrchk(cudaFree(accumulator_d));
         gpuErrchk(cudaFree(localForceLattice_d));
         gpuErrchk(cudaFree(localForceLatticeResult_d));
         gpuErrchk(cudaFree(latticeShifted_d));
