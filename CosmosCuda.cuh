@@ -757,7 +757,7 @@ namespace Kernels {
             const int index = ii * numTotalThreads + globalThread;
             if (index < N * N) {
                 const float diff = smoothMax - smoothMin;
-                output_d[index] = powf((input_d[index] - smoothMin) / diff, 0.05f);
+                output_d[index] = powf((input_d[index] - smoothMin) / diff, 0.2f);
             }
         }
     }
@@ -946,7 +946,8 @@ public:
                 const int index = ix + HALF_WIDTH + (iy + HALF_WIDTH) * Constants::LOCAL_CONV_WIDTH;
                 const double r = sqrt((double)(ix * ix + iy * iy));
                 float mult = (Constants::N / 2048.0f) * (Constants::N / 2048.0f);
-                if (r > 2.0 && r < HALF_WIDTH) {
+                constexpr float selfAvoidanceRangeForAccuracy = 2.0f;
+                if (r > selfAvoidanceRangeForAccuracy && r < HALF_WIDTH) {
                     localForceFilter[index] = mult / r;
                 }
                 else {
