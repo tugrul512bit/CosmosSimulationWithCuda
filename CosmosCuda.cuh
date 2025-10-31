@@ -43,14 +43,23 @@ namespace Constants {
     constexpr int BLUR_HALF_R = (BLUR_R - 1) / 2;
 }
 namespace Kernels {
-
+    constexpr int SUB_MATRIX_SIZE = 32;
+    constexpr int NUM_SUB_MATRICES_PER_DIMENSION = Constants::N / SUB_MATRIX_SIZE;
+    constexpr int PAIR_LIST_SIZE = (NUM_SUB_MATRICES_PER_DIMENSION * (NUM_SUB_MATRICES_PER_DIMENSION - 1)) / 2;
+    __constant__ float shortRangeGravKern_c[Constants::LOCAL_CONV_WIDTH * Constants::LOCAL_CONV_WIDTH];
+    __constant__ float renderBlurKern_c[Constants::BLUR_R * Constants::BLUR_R];
+    __device__ int2 pairIndexList_d[PAIR_LIST_SIZE];
+    __device__ float minVar;
+    __device__ float maxVar;
+    __device__ float smoothMin;
+    __device__ float smoothMax;
+    __device__ ComplexVar wCoefficients[Constants::N * 2];
     __device__ __host__ __forceinline__ ComplexVar makeComplexVar(float x, float y) {
         ComplexVar result;
         result.x = x;
         result.y = y;
         return result;
     }
-    __device__ ComplexVar wCoefficients[Constants::N * 2];
     __device__ __forceinline__ ComplexVar d_wForNk(const double N, const double k) {
         const double angle = (-2.0 * Constants::MATH_PI * k) / N;
         return makeComplexVar(cos(angle), -sin(angle));
@@ -196,10 +205,6 @@ namespace Kernels {
         }
     }
     // Computes pair indices to be used in transpose operations without requiring double-precision calculation at expense of memory fetch.
-    constexpr int SUB_MATRIX_SIZE = 32;
-    constexpr int NUM_SUB_MATRICES_PER_DIMENSION = Constants::N / SUB_MATRIX_SIZE;
-    constexpr int PAIR_LIST_SIZE = (NUM_SUB_MATRICES_PER_DIMENSION * (NUM_SUB_MATRICES_PER_DIMENSION - 1)) / 2;
-    __device__ int2 pairIndexList_d[PAIR_LIST_SIZE];
     template<int N>
     __global__ void k_fillPairIndexList() {
         const int thread = threadIdx.x;
@@ -634,8 +639,6 @@ namespace Kernels {
         }
     }
 
-    __device__ float minVar;
-    __device__ float maxVar;
     __global__ void k_resetMinMax() {
         minVar = FLT_MAX;
         maxVar = FLT_MIN;
@@ -747,8 +750,6 @@ namespace Kernels {
             }
         }
     }
-    __device__ float smoothMin;
-    __device__ float smoothMax;
     __global__ void k_initSmoothMinMax() {
         smoothMin = 1e35f;
         smoothMax = -1.0f;
@@ -780,8 +781,6 @@ namespace Kernels {
         }
     }
     // This is to capture short-range details missed by FFT.
-    __constant__ float shortRangeGravKern_c[Constants::LOCAL_CONV_WIDTH * Constants::LOCAL_CONV_WIDTH];
-    __constant__ float renderBlurKern_c[Constants::BLUR_R * Constants::BLUR_R];
     constexpr int TILE_SIZE = 32;
     template<int K, int N>
     __global__ void k_calcLocalMassConvolution(const float* const __restrict__ latticeIn_d, float* const __restrict__ latticeOut_d) {
@@ -909,6 +908,8 @@ private:
     std::mt19937 rng;
 
     // For device
+    cudaStream_t computeStream;
+    cudaStream_t latticeBroadcastStream;
     cudaEvent_t eventStart;
     cudaEvent_t eventStop;
     ComplexVar* lattice_d;
@@ -927,8 +928,17 @@ private:
     float* localForceLatticeResult_d;
     int numBlocks;
     int cudaDeviceIndex;
+
     // Accuracy setting: increases accuracy of mass projections and force sampling at cost of 50% performance
     bool accuracy;
+
+    // For frame queue
+    std::mutex lock;
+    std::vector<std::vector<float>> frames;
+    std::thread computeThread;
+    int pushCtr;
+    int popCtr;
+    bool working;
 public:
     Universe(int particles, int cudaDevice, bool lowAccuracy, int numStepsPerRender) {
         accuracy = !lowAccuracy;
@@ -937,6 +947,7 @@ public:
         numNbodyStepsPerRender = numStepsPerRender;
         cudaDeviceIndex = cudaDevice;
         gpuErrchk(cudaSetDevice(cudaDevice));
+        gpuErrchk(cudaStreamCreate(&computeStream));
         cudaDeviceProp prop;
         gpuErrchk(cudaGetDeviceProperties(&prop, cudaDevice));
         int blocksPerSM = (prop.maxThreadsPerMultiProcessor + Constants::THREADS - 1) / Constants::THREADS;
@@ -988,38 +999,38 @@ public:
                 }
             }
         }
-        gpuErrchk(cudaMemcpyToSymbol(Kernels::shortRangeGravKern_c, localForceFilter.data(), sizeof(float) * Constants::LOCAL_CONV_WIDTH * Constants::LOCAL_CONV_WIDTH, 0, cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpyToSymbol(Kernels::renderBlurKern_c, renderFilter.data(), sizeof(float) * Constants::BLUR_R * Constants::BLUR_R, 0, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpyToSymbolAsync(Kernels::shortRangeGravKern_c, localForceFilter.data(), sizeof(float) * Constants::LOCAL_CONV_WIDTH * Constants::LOCAL_CONV_WIDTH, 0, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaMemcpyToSymbolAsync(Kernels::renderBlurKern_c, renderFilter.data(), sizeof(float) * Constants::BLUR_R * Constants::BLUR_R, 0, cudaMemcpyHostToDevice, computeStream));
         particleCounter = numParticles;
         gpuErrchk(cudaEventCreate(&eventStart));
         gpuErrchk(cudaEventCreate(&eventStop));
-        gpuErrchk(cudaMalloc(&lattice_d, sizeof(ComplexVar) * Constants::N * Constants::N));
-        gpuErrchk(cudaMalloc(&localForceLattice_d, sizeof(float) * Constants::N * Constants::N));
-        gpuErrchk(cudaMalloc(&localForceLatticeResult_d, sizeof(float) * Constants::N * Constants::N));
-        gpuErrchk(cudaMalloc(&latticeShifted_d, sizeof(float) * Constants::N * Constants::N));
-        gpuErrchk(cudaMalloc(&latticeShiftedForceXY_d, sizeof(float2) * Constants::N * Constants::N));
-        gpuErrchk(cudaMalloc(&filter_d, sizeof(ComplexVar) * Constants::N * Constants::N));
-        gpuErrchk(cudaMalloc(&x_d, sizeof(float) * numParticles));
-        gpuErrchk(cudaMalloc(&y_d, sizeof(float) * numParticles));
-        gpuErrchk(cudaMalloc(&vx_d, sizeof(float) * numParticles));
-        gpuErrchk(cudaMalloc(&vy_d, sizeof(float) * numParticles));
-        gpuErrchk(cudaMalloc(&m_d, sizeof(float) * numParticles));
-        gpuErrchk(cudaMalloc(&accumulator_d, sizeof(float) * Constants::N * Constants::N));
-        gpuErrchk(cudaMalloc(&renderOutput_d, sizeof(float) * Constants::N * Constants::N));
-        gpuErrchk(cudaMalloc(&renderOutput2_d, sizeof(float) * Constants::N * Constants::N));
-        gpuErrchk(cudaMemcpy(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(vx_d, vx.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(vy_d, vy.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(m_d, m.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMallocAsync(&lattice_d, sizeof(ComplexVar) * Constants::N * Constants::N, computeStream));
+        gpuErrchk(cudaMallocAsync(&localForceLattice_d, sizeof(float) * Constants::N * Constants::N, computeStream));
+        gpuErrchk(cudaMallocAsync(&localForceLatticeResult_d, sizeof(float) * Constants::N * Constants::N, computeStream));
+        gpuErrchk(cudaMallocAsync(&latticeShifted_d, sizeof(float) * Constants::N * Constants::N, computeStream));
+        gpuErrchk(cudaMallocAsync(&latticeShiftedForceXY_d, sizeof(float2) * Constants::N * Constants::N, computeStream));
+        gpuErrchk(cudaMallocAsync(&filter_d, sizeof(ComplexVar) * Constants::N * Constants::N, computeStream));
+        gpuErrchk(cudaMallocAsync(&x_d, sizeof(float) * numParticles, computeStream));
+        gpuErrchk(cudaMallocAsync(&y_d, sizeof(float) * numParticles, computeStream));
+        gpuErrchk(cudaMallocAsync(&vx_d, sizeof(float) * numParticles, computeStream));
+        gpuErrchk(cudaMallocAsync(&vy_d, sizeof(float) * numParticles, computeStream));
+        gpuErrchk(cudaMallocAsync(&m_d, sizeof(float) * numParticles, computeStream));
+        gpuErrchk(cudaMallocAsync(&accumulator_d, sizeof(float) * Constants::N * Constants::N, computeStream));
+        gpuErrchk(cudaMallocAsync(&renderOutput_d, sizeof(float) * Constants::N * Constants::N, computeStream));
+        gpuErrchk(cudaMallocAsync(&renderOutput2_d, sizeof(float) * Constants::N * Constants::N, computeStream));
+        gpuErrchk(cudaMemcpyAsync(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaMemcpyAsync(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaMemcpyAsync(vx_d, vx.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaMemcpyAsync(vy_d, vy.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaMemcpyAsync(m_d, m.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
         cudaFuncSetAttribute(Kernels::k_calcFftBatched1D<Constants::N>, cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxShared);
         cudaFuncSetAttribute(Kernels::k_calcFftBatched1D<Constants::N>, cudaFuncAttributeMaxDynamicSharedMemorySize, Constants::N * sizeof(ComplexVar));
-        Kernels::k_fillCoefficientArray<Constants::N><<<1, 1024 >>>();
-        Kernels::k_fillPairIndexList<Constants::N><<<numBlocks, Constants::THREADS>>>();
-        Kernels::k_generateFilterLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(filter_d, accuracy);
-        Kernels::k_initSmoothMinMax<<<1, 1>>>();
+        Kernels::k_fillCoefficientArray<Constants::N><<<1, 1024,0, computeStream>>>();
+        Kernels::k_fillPairIndexList<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>();
+        Kernels::k_generateFilterLattice<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream >>>(filter_d, accuracy);
+        Kernels::k_initSmoothMinMax<<<1, 1, 0, computeStream >>>();
         calcFilterFft2D();
-        gpuErrchk(cudaDeviceSynchronize());
+        gpuErrchk(cudaStreamSynchronize(computeStream));
         rng = std::mt19937(static_cast<unsigned int>(std::time(0)));
     }
     // Requires same number of particles as the simulator.
@@ -1029,11 +1040,12 @@ public:
         vx.swap(sourceVX);
         vy.swap(sourceVY);
         m.swap(sourceMass);
-        gpuErrchk(cudaMemcpy(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(vx_d, vx.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(vy_d, vy.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(m_d, m.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpyAsync(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaMemcpyAsync(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaMemcpyAsync(vx_d, vx.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaMemcpyAsync(vy_d, vy.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaMemcpyAsync(m_d, m.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaStreamSynchronize(computeStream));
     }
     // Moves all particles out of simulation area.
     void clear() {
@@ -1041,8 +1053,9 @@ public:
             x[i] = -10.0f;
             y[i] = -10.0f;
         }
-        gpuErrchk(cudaMemcpy(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpyAsync(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaMemcpyAsync(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaStreamSynchronize(computeStream));
         particleCounter = 0;
     }
     // Adds a galaxy with n particles, with center at (centerX, centerY) normalized coordinates.
@@ -1080,72 +1093,68 @@ public:
         }
         particleCounter = maxCount;
 
-        gpuErrchk(cudaMemcpy(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(vx_d, vx.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(vy_d, vy.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
-        gpuErrchk(cudaMemcpy(m_d, m.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
+        gpuErrchk(cudaMemcpyAsync(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaMemcpyAsync(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaMemcpyAsync(vx_d, vx.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaMemcpyAsync(vy_d, vy.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaMemcpyAsync(m_d, m.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice, computeStream));
+        gpuErrchk(cudaStreamSynchronize(computeStream));
     }
 private:
     // todo: scatter on 9 cells per mass to improve accuracy more.
     void scatterMassOnLattice() {
-        Kernels::k_clearAccumulator<Constants::N><<<numBlocks, Constants::THREADS>>>(accumulator_d);
-        Kernels::k_scatterMassOnAccumulator<Constants::N><<<numBlocks, Constants::THREADS>>>(accumulator_d, x_d, y_d, m_d, numParticles, accuracy);
-        Kernels::k_copyAccumulatorIntoLattice<Constants::N> << <numBlocks, Constants::THREADS >> > (accumulator_d, lattice_d);
+        Kernels::k_clearAccumulator<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(accumulator_d);
+        Kernels::k_scatterMassOnAccumulator<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(accumulator_d, x_d, y_d, m_d, numParticles, accuracy);
+        Kernels::k_copyAccumulatorIntoLattice<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(accumulator_d, lattice_d);
         if (nbodyCalcCounter == numNbodyStepsPerRender - 1) {
-            Kernels::k_getRealComponentOfLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, renderOutput_d);
-            Kernels::k_calcBlurConvolution<Constants::BLUR_R, Constants::N><<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::BLUR_R + Kernels::TILE_SIZE)* (Constants::BLUR_R + Kernels::TILE_SIZE) >> > (renderOutput_d, renderOutput2_d);
-            Kernels::k_resetMinMax<<<1, 1>>>();
-            Kernels::k_calcMinMax<Constants::N><<<numBlocks, Constants::THREADS>>>(renderOutput2_d);
-            Kernels::k_smoothMinMax<<<1, 1>>>();
-            Kernels::k_scaleWithMinMax<Constants::N><<<numBlocks, Constants::THREADS>>>(renderOutput2_d, renderOutput_d);
+            Kernels::k_getRealComponentOfLattice<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(lattice_d, renderOutput_d);
+            Kernels::k_calcBlurConvolution<Constants::BLUR_R, Constants::N><<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float) * (Constants::BLUR_R + Kernels::TILE_SIZE)* (Constants::BLUR_R + Kernels::TILE_SIZE), computeStream>>>(renderOutput_d, renderOutput2_d);
+            Kernels::k_resetMinMax<<<1, 1, 0, computeStream>>>();
+            Kernels::k_calcMinMax<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(renderOutput2_d);
+            Kernels::k_smoothMinMax<<<1, 1, 0, computeStream>>>();
+            Kernels::k_scaleWithMinMax<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(renderOutput2_d, renderOutput_d);
         }
         // Accuracy mode also adds a short-range force component using normal convolution.
         if (accuracy) {
-            Kernels::k_getRealComponentOfLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, localForceLattice_d);
-            Kernels::k_calcLocalMassConvolution<Constants::LOCAL_CONV_WIDTH, Constants::N> <<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE) >> > (localForceLattice_d, localForceLatticeResult_d);
+            Kernels::k_getRealComponentOfLattice<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(lattice_d, localForceLattice_d);
+            Kernels::k_calcLocalMassConvolution<Constants::LOCAL_CONV_WIDTH, Constants::N><<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE), computeStream>>>(localForceLattice_d, localForceLatticeResult_d);
         }
     }
     void calcLatticeFft2D() {
-        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar)>>>(lattice_d, false);
-        Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS>>> (lattice_d);
-        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS >> > (lattice_d);
-        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar)>>>(lattice_d, false);
-        Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS>>> (lattice_d);
-        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d);
+        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream>>>(lattice_d, false);
+        Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>> (lattice_d);
+        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(lattice_d);
+        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream>>>(lattice_d, false);
+        Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(lattice_d);
+        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(lattice_d);
 
     }
     void calcFilterFft2D() {
-        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar)>>>(filter_d, false);
-        Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS>>>(filter_d);
-        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS>>>(filter_d);
-        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar)>>>(filter_d, false);
-        Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS>>>(filter_d);
-        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS>>>(filter_d);
+        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream>>>(filter_d, false);
+        Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(filter_d);
+        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(filter_d);
+        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream>>>(filter_d, false);
+        Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(filter_d);
+        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(filter_d);
 
     }
     void multiplyLatticeFilterElementwise() {
-        Kernels::k_multElementwiseLatticeFilter<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, filter_d);
+        Kernels::k_multElementwiseLatticeFilter<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(lattice_d, filter_d);
     }
     void calcLatticeIfft2D() {
-        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar)>>>(lattice_d, true);
-        Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d);
-        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d);
-        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar)>>>(lattice_d, true);
-        Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d);
-        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d);
+        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream>>>(lattice_d, true);
+        Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(lattice_d);
+        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(lattice_d);
+        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks, Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream>>>(lattice_d, true);
+        Kernels::k_calcTranspose<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(lattice_d);
+        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(lattice_d);
     }
     void multiSampleForces() {
-        Kernels::k_shiftLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, localForceLatticeResult_d, latticeShifted_d, accuracy);
-        Kernels::k_calcGradientLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(latticeShifted_d, latticeShiftedForceXY_d);
-        Kernels::k_forceMultiSampling<Constants::N><<<numBlocks, Constants::THREADS>>>(latticeShiftedForceXY_d, x_d, y_d, vx_d, vy_d, numParticles, accuracy);
+        Kernels::k_shiftLattice<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(lattice_d, localForceLatticeResult_d, latticeShifted_d, accuracy);
+        Kernels::k_calcGradientLattice<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(latticeShifted_d, latticeShiftedForceXY_d);
+        Kernels::k_forceMultiSampling<Constants::N><<<numBlocks, Constants::THREADS, 0, computeStream>>>(latticeShiftedForceXY_d, x_d, y_d, vx_d, vy_d, numParticles, accuracy);
     }
-    std::mutex lock;
-    std::vector<std::vector<float>> frames;
-    std::thread computeThread;
-    int pushCtr;
-    int popCtr;
-    bool working;
+
     void pushFrame(std::vector<float>& frame, bool& workingTmp) {
         std::lock_guard<std::mutex> lg(lock);
         if (pushCtr < popCtr + Constants::MAX_FRAMES_BUFFERED - 1) {
@@ -1178,7 +1187,7 @@ private:
             bool workingTmp = true;
             while (workingTmp) {
                 if (nbodyCalcCounter == 0) {
-                    gpuErrchk(cudaEventRecord(eventStart));
+                    gpuErrchk(cudaEventRecord(eventStart, computeStream));
                 }
                 scatterMassOnLattice();
                 calcLatticeFft2D();
@@ -1188,11 +1197,12 @@ private:
                 nbodyCalcCounter++;
                 if (nbodyCalcCounter == numNbodyStepsPerRender) {
                     nbodyCalcCounter = 0;
-                    gpuErrchk(cudaEventRecord(eventStop));
-                    gpuErrchk(cudaDeviceSynchronize());
+                    gpuErrchk(cudaEventRecord(eventStop, computeStream));
+                    gpuErrchk(cudaStreamSynchronize(computeStream));
                     float milliseconds;
                     gpuErrchk(cudaEventElapsedTime(&milliseconds, eventStart, eventStop));
-                    gpuErrchk(cudaMemcpy(frame.data(), renderOutput_d, sizeof(float) * Constants::N * Constants::N, cudaMemcpyDeviceToHost));
+                    gpuErrchk(cudaMemcpyAsync(frame.data(), renderOutput_d, sizeof(float) * Constants::N * Constants::N, cudaMemcpyDeviceToHost, computeStream));
+                    gpuErrchk(cudaStreamSynchronize(computeStream));
                     frame[Constants::N * Constants::N] = milliseconds / numNbodyStepsPerRender;
                     pushFrame(frame, workingTmp);
                 }
@@ -1219,21 +1229,23 @@ private:
         computeThread.join();
     }
     ~Universe() {
-        gpuErrchk(cudaFree(lattice_d));
-        gpuErrchk(cudaFree(accumulator_d));
-        gpuErrchk(cudaFree(localForceLattice_d));
-        gpuErrchk(cudaFree(localForceLatticeResult_d));
-        gpuErrchk(cudaFree(latticeShifted_d));
-        gpuErrchk(cudaFree(latticeShiftedForceXY_d));
-        gpuErrchk(cudaFree(filter_d));
-        gpuErrchk(cudaFree(x_d));
-        gpuErrchk(cudaFree(y_d));
-        gpuErrchk(cudaFree(vx_d));
-        gpuErrchk(cudaFree(vy_d));
-        gpuErrchk(cudaFree(m_d));
-        gpuErrchk(cudaFree(renderOutput_d));
-        gpuErrchk(cudaFree(renderOutput2_d));
+        gpuErrchk(cudaFreeAsync(lattice_d, computeStream));
+        gpuErrchk(cudaFreeAsync(accumulator_d, computeStream));
+        gpuErrchk(cudaFreeAsync(localForceLattice_d, computeStream));
+        gpuErrchk(cudaFreeAsync(localForceLatticeResult_d, computeStream));
+        gpuErrchk(cudaFreeAsync(latticeShifted_d, computeStream));
+        gpuErrchk(cudaFreeAsync(latticeShiftedForceXY_d, computeStream));
+        gpuErrchk(cudaFreeAsync(filter_d, computeStream));
+        gpuErrchk(cudaFreeAsync(x_d, computeStream));
+        gpuErrchk(cudaFreeAsync(y_d, computeStream));
+        gpuErrchk(cudaFreeAsync(vx_d, computeStream));
+        gpuErrchk(cudaFreeAsync(vy_d, computeStream));
+        gpuErrchk(cudaFreeAsync(m_d, computeStream));
+        gpuErrchk(cudaFreeAsync(renderOutput_d, computeStream));
+        gpuErrchk(cudaFreeAsync(renderOutput2_d, computeStream));
         gpuErrchk(cudaEventDestroy(eventStart));
         gpuErrchk(cudaEventDestroy(eventStop));
+        gpuErrchk(cudaStreamSynchronize(computeStream));
+        gpuErrchk(cudaStreamDestroy(computeStream));
     }
 };
