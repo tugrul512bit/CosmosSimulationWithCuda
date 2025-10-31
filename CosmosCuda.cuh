@@ -38,7 +38,7 @@ namespace Constants {
 
     // For render buffer output. Asynchronously filled.
     constexpr int MAX_FRAMES_BUFFERED = 40;
-    constexpr int BLUR_R = 5;
+    constexpr int BLUR_R = 3;
     constexpr int BLUR_HALF_R = (BLUR_R - 1) / 2;
 }
 namespace Kernels {
@@ -59,7 +59,7 @@ namespace Kernels {
         const int thread = threadIdx.x;
         const int threads = blockDim.x;
         int offset = 0;
-        for (int i = 1; i < Constants::N; i *= 2) {
+        for (int i = 1; i < N; i *= 2) {
             const int steps = (i * 2 + threads - 1) / threads;
             for (int j = 0; j < steps; j++) {
                 const int id = j * threads + thread;
@@ -133,7 +133,7 @@ namespace Kernels {
                 for (int blc = 0; blc < blockSteps; blc++) {
                     const unsigned int col = blc * Constants::THREADS + thread;
                     if (col < N) {
-                        vars[blc] = s_coalescing[__brev(col) >> (32 - d_bits<N>())];
+                        vars[blc] = s_coalescing[__brev(col) >> (32 - d_bits<Constants::N>())];
                     }
                     d_calcWarpDft(vars[blc], warpLane, inverseMult, wCoefficients);
                 }
@@ -237,8 +237,8 @@ namespace Kernels {
                 if (i < j) {
                     const int tileX = i * SUB_MATRIX_SIZE;
                     const int tileY = j * SUB_MATRIX_SIZE;
-                    const int tileOffset = tileX + tileY * Constants::N;
-                    const int tileOffset2 = tileY + tileX * Constants::N;
+                    const int tileOffset = tileX + tileY * N;
+                    const int tileOffset2 = tileY + tileX * N;
                     constexpr int SUB_ELEMENTS = SUB_MATRIX_SIZE * SUB_MATRIX_SIZE;
                     const int steps2 = (SUB_ELEMENTS + numThreads - 1) / numThreads;
                     #pragma unroll
@@ -247,8 +247,8 @@ namespace Kernels {
                         if (element < SUB_ELEMENTS) {
                             const int col = element % SUB_MATRIX_SIZE;
                             const int row = element / SUB_MATRIX_SIZE;
-                            s_tile[row][col] = data[tileOffset + col + row * Constants::N];
-                            s_tile2[row][col] = data[tileOffset2 + col + row * Constants::N];
+                            s_tile[row][col] = data[tileOffset + col + row * N];
+                            s_tile2[row][col] = data[tileOffset2 + col + row * N];
                         }
                     }
                     __syncthreads();
@@ -258,8 +258,8 @@ namespace Kernels {
                         if (element < SUB_ELEMENTS) {
                             const int col = element % SUB_MATRIX_SIZE;
                             const int row = element / SUB_MATRIX_SIZE;
-                            data[tileOffset2 + col + row * Constants::N] = s_tile[col][row];
-                            data[tileOffset + col + row * Constants::N] = s_tile2[col][row];
+                            data[tileOffset2 + col + row * N] = s_tile[col][row];
+                            data[tileOffset + col + row * N] = s_tile2[col][row];
                         }
                     }
                     __syncthreads();
@@ -284,7 +284,7 @@ namespace Kernels {
                 const int j = index;
                 const int tileX = i * SUB_MATRIX_SIZE;
                 const int tileY = j * SUB_MATRIX_SIZE;
-                const int tileOffset = tileX + tileY * Constants::N;
+                const int tileOffset = tileX + tileY * N;
                 constexpr int SUB_ELEMENTS = SUB_MATRIX_SIZE * SUB_MATRIX_SIZE;
                 const int steps2 = (SUB_ELEMENTS + numThreads - 1) / numThreads;
                 #pragma unroll
@@ -293,7 +293,7 @@ namespace Kernels {
                     if (element < SUB_ELEMENTS) {
                         const int col = element % SUB_MATRIX_SIZE;
                         const int row = element / SUB_MATRIX_SIZE;
-                        s_tile[row][col] = data[tileOffset + col + row * Constants::N];
+                        s_tile[row][col] = data[tileOffset + col + row * N];
                     }
                 }
                 __syncthreads();
@@ -303,7 +303,7 @@ namespace Kernels {
                     if (element < SUB_ELEMENTS) {
                         const int col = element % SUB_MATRIX_SIZE;
                         const int row = element / SUB_MATRIX_SIZE;
-                        data[tileOffset + col + row * Constants::N] = s_tile[col][row];
+                        data[tileOffset + col + row * N] = s_tile[col][row];
                     }
                 }
                 __syncthreads();
@@ -318,7 +318,7 @@ namespace Kernels {
         const int numThreads = blockDim.x;
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
-        const int steps = (Constants::N * Constants::N + numTotalThreads - 1) / numTotalThreads;
+        const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
         //constexpr float cutoff = 2.0f;
         // when accuracy mode enabled, a second lattice is computed only for closest neighbors (within 16 lattice cells radius) using direct convolution.
         constexpr float selfForceAvoidance = 2.0f;
@@ -327,23 +327,23 @@ namespace Kernels {
         #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
-            if (index < Constants::N * Constants::N) {
-                const int i = index % Constants::N;
-                const int j = index / Constants::N;
-                const int cx = Constants::N / 2;
-                const int cy = Constants::N / 2;
+            if (index < N * N) {
+                const int i = index % N;
+                const int j = index / N;
+                const int cx = N / 2;
+                const int cy = N / 2;
                 const float dx = i - cx;
                 const float dy = j - cy;
                 const float r = sqrtf(dx * dx + dy * dy);
-                float mult = 1.0f;
+                float mult = (N / 2048.0f) * (N / 2048.0f);
                 
                 if (r > cutoff) {
-                    data[((i + Constants::N / 2) % Constants::N) + ((j + Constants::N / 2) % Constants::N) * Constants::N].x = mult / r;
-                    data[((i + Constants::N / 2) % Constants::N) + ((j + Constants::N / 2) % Constants::N) * Constants::N].y = 0.0f;
+                    data[((i + N / 2) % N) + ((j + N / 2) % N) * N].x = mult / r;
+                    data[((i + N / 2) % N) + ((j + N / 2) % N) * N].y = 0.0f;
                 }
                 else {
-                    data[((i + Constants::N / 2) % Constants::N) + ((j + Constants::N / 2) % Constants::N) * Constants::N].x = 0.0f;
-                    data[((i + Constants::N / 2) % Constants::N) + ((j + Constants::N / 2) % Constants::N) * Constants::N].y = 0.0f;
+                    data[((i + N / 2) % N) + ((j + N / 2) % N) * N].x = 0.0f;
+                    data[((i + N / 2) % N) + ((j + N / 2) % N) * N].y = 0.0f;
                 }
             }
         }
@@ -356,20 +356,20 @@ namespace Kernels {
         const int numThreads = blockDim.x;
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
-        const int steps = (Constants::N * Constants::N + numTotalThreads - 1) / numTotalThreads;
+        const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
         #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
-            if (index < Constants::N * Constants::N) {
-                const int i = index % Constants::N;
-                const int j = index / Constants::N;
-                auto d1 = data[i + j * Constants::N];
-                const auto d2 = data2[i + j * Constants::N];
+            if (index < N * N) {
+                const int i = index % N;
+                const int j = index / N;
+                auto d1 = data[i + j * N];
+                const auto d2 = data2[i + j * N];
                 const float tmpX = d1.x * d2.x - d1.y * d2.y;
                 const float tmpY = d1.x * d2.y + d1.y * d2.x;
                 d1.x = tmpX;
                 d1.y = tmpY;
-                data[i + j * Constants::N] = d1;
+                data[i + j * N] = d1;
             }
         }
     }
@@ -399,29 +399,29 @@ namespace Kernels {
                 if (centerX - 1 >= 0) {
                     left = __ldca(&lattice_d[index - 1]);
                 }
-                if (centerX + 1 < Constants::N) {
+                if (centerX + 1 < N) {
                     right = __ldca(&lattice_d[index + 1]);
                 }
                 if (centerY - 1 >= 0) {
-                    top = __ldca(&lattice_d[index - Constants::N]);
+                    top = __ldca(&lattice_d[index - N]);
                 }
-                if (centerY + 1 < Constants::N) {
-                    bot = __ldca(&lattice_d[index + Constants::N]);
+                if (centerY + 1 < N) {
+                    bot = __ldca(&lattice_d[index + N]);
                 }
                 if (centerX - 2 >= 0) {
                     leftLeft = __ldca(&lattice_d[index - 2]);
                 }
-                if (centerX + 2 < Constants::N) {
+                if (centerX + 2 < N) {
                     rightRight = __ldca(&lattice_d[index + 2]);
                 }
                 if (centerY - 2 >= 0) {
-                    topTop = __ldca(&lattice_d[index - 2*Constants::N]);
+                    topTop = __ldca(&lattice_d[index - 2*N]);
                 }
-                if (centerY + 2 < Constants::N) {
-                    botBot = __ldca(&lattice_d[index + 2*Constants::N]);
+                if (centerY + 2 < N) {
+                    botBot = __ldca(&lattice_d[index + 2*N]);
                 }
                 // Gradient
-                const float h = 1024.0f / Constants::N;
+                const float h = 1024.0f / N;
                 const float forceComponentX = (-rightRight + 8.0f * right - 8.0f * left + leftLeft) / (h * 12.0f);
                 const float forceComponentY = (-botBot + 8.0f * bot - 8.0f * top + topTop) / (h * 12.0f);
                 
@@ -431,7 +431,7 @@ namespace Kernels {
     }
 
     template<int N>
-    __global__ void k_forceMultiSampling(const float2* const __restrict__ latticeForceXY_d, float* const __restrict__ x, float* const __restrict__ y, float* const __restrict__ vx, float* const __restrict__ vy, float* const __restrict__ m, const int numParticles, const bool accuracy) {
+    __global__ void k_forceMultiSampling(const float2* const __restrict__ latticeForceXY_d, float* const __restrict__ x, float* const __restrict__ y, float* const __restrict__ vx, float* const __restrict__ vy, const int numParticles, const bool accuracy) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -447,19 +447,16 @@ namespace Kernels {
                 const float4 posYr = __ldcs(reinterpret_cast<float4*>(&y[index * 4]));
                 const float4 posVXr = __ldcs(reinterpret_cast<float4*>(&vx[index * 4]));
                 const float4 posVYr = __ldcs(reinterpret_cast<float4*>(&vy[index * 4]));
-                const float4 massData = __ldcs(reinterpret_cast<float4*>(&m[index * 4]));
                 float posX[4] = { posXr.x,posXr.y,posXr.z,posXr.w };
                 float posY[4] = { posYr.x,posYr.y,posYr.z,posYr.w };
                 float vxr[4] = { posVXr.x, posVXr.y, posVXr.z, posVXr.w };
                 float vyr[4] = { posVYr.x, posVYr.y, posVYr.z, posVYr.w };
-                float mass[4] = { massData.x, massData.y, massData.z, massData.w };
                 #pragma unroll 4
                 for (int m = 0; m < 4; m++) {
                     const int centerX = int(posX[m]);
                     const int centerY = int(posY[m]);
-                    const float inverseMass = 1.0f / mass[m];
-                    const int centerIndex = centerX + centerY * Constants::N;
-                    if (centerX >= 1 && centerX < Constants::N - 1 && centerY >= 1 && centerY < Constants::N - 1) {
+                    const int centerIndex = centerX + centerY * N;
+                    if (centerX >= 1 && centerX < N - 1 && centerY >= 1 && centerY < N - 1) {
                         // Getting precalculated gradient. This should benefit from caching when many particles access same point.
                         // Then calculating interpolation for a more accurate behavior.
                         float xComponent;
@@ -467,8 +464,8 @@ namespace Kernels {
                         if (accuracy) {
                             const float2 forceComponentsCurrent = __ldca(&latticeForceXY_d[centerIndex]);
                             const float2 forceComponentsRight = __ldca(&latticeForceXY_d[centerIndex + 1]);
-                            const float2 forceComponentsBottom = __ldca(&latticeForceXY_d[centerIndex + Constants::N]);
-                            const float2 forceComponentsBottomRight = __ldca(&latticeForceXY_d[centerIndex + 1 + Constants::N]);
+                            const float2 forceComponentsBottom = __ldca(&latticeForceXY_d[centerIndex + N]);
+                            const float2 forceComponentsBottomRight = __ldca(&latticeForceXY_d[centerIndex + 1 + N]);
                             const float fractionalX = posX[m] - centerX;
                             const float fractionalY = posY[m] - centerY;
                             const float xDiff1 = 1.0f - fractionalX;
@@ -490,21 +487,21 @@ namespace Kernels {
                         float newX = fmaf(vxr[m], Constants::dt, posX[m]);
                         float newY = fmaf(vyr[m], Constants::dt, posY[m]);
                         if (newX < 2.0f) {
-                            newX += Constants::N - 4.0f;
+                            newX += N - 4.0f;
                         }
                         if (newY < 2.0f) {
-                            newY += Constants::N - 4.0f;
+                            newY += N - 4.0f;
                         }
-                        if (newX > Constants::N - 2.0f) {
-                            newX -= Constants::N - 4.0f;
+                        if (newX > N - 2.0f) {
+                            newX -= N - 4.0f;
                         }
-                        if (newY > Constants::N - 2.0f) {
-                            newY -= Constants::N - 4.0f;
+                        if (newY > N - 2.0f) {
+                            newY -= N - 4.0f;
                         }
                         posX[m] = newX;
                         posY[m] = newY;
-                        vxr[m] = fmaf(xComponent * inverseMass, Constants::dt, vxr[m]);
-                        vyr[m] = fmaf(yComponent * inverseMass, Constants::dt, vyr[m]);
+                        vxr[m] = fmaf(xComponent, Constants::dt, vxr[m]);
+                        vyr[m] = fmaf(yComponent, Constants::dt, vyr[m]);
                     }
                 }
                 __stcs(reinterpret_cast<float4*>(&x[index * 4]), make_float4(posX[0], posX[1], posX[2], posX[3]));
@@ -524,11 +521,11 @@ namespace Kernels {
         const int numThreads = blockDim.x;
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
-        const int steps = (Constants::N * Constants::N + numTotalThreads - 1) / numTotalThreads;
+        const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
         #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
-            if (index < Constants::N * Constants::N) {
+            if (index < N * N) {
                 lattice_d[index] = ComplexVar{ 0.0f, 0.0f };
             }
         }
@@ -543,16 +540,15 @@ namespace Kernels {
         const int numThreads = blockDim.x;
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
-        const int steps = (Constants::N * Constants::N + numTotalThreads - 1) / numTotalThreads;
+        const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
         #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
-            if (index < Constants::N * Constants::N) {
-                const int x = index % Constants::N;
-                const int y = index / Constants::N;
-                const int shiftedX = (x - Constants::N / 2 + Constants::N * 2) % Constants::N;
-                const int shiftedY = (y - Constants::N / 2 + Constants::N * 2) % Constants::N;
-                //latticeShifted_d[index] = lattice_d[shiftedX + shiftedY * Constants::N].x;
+            if (index < N * N) {
+                const int x = index % N;
+                const int y = index / N;
+                const int shiftedX = (x - N / 2 + N * 2) % N;
+                const int shiftedY = (y - N / 2 + N * 2) % N;
                 if (accuracy) {
                     latticeShifted_d[index] = lattice_d[index].x + latticeLocal_d[index];
                 }
@@ -580,7 +576,7 @@ namespace Kernels {
                 const float mass = __ldcs(&m[index]);
                 const int xi = xf;
                 const int yi = yf;
-                if (xi >= 1 && xi < Constants::N - 1 && yi >= 1 && yi < Constants::N - 1) {
+                if (xi >= 1 && xi < N - 1 && yi >= 1 && yi < N - 1) {
                     const float fractionalX = xf - xi;
                     const float fractionalY = yf - yi;
                     const float xDiff1 = 1.0f - fractionalX;
@@ -591,12 +587,12 @@ namespace Kernels {
                     const float weightBottomRight = fractionalX * fractionalY;
                     // Optional weighted scattering for more accuracy.
                     if (accuracy) {
-                        atomicAdd(&lattice_d[xi + yi * Constants::N].x, weightCurrent * mass);
-                        atomicAdd(&lattice_d[1 + xi + yi * Constants::N].x, weightRight * mass);
-                        atomicAdd(&lattice_d[xi + (yi + 1) * Constants::N].x, weightBottom * mass);
-                        atomicAdd(&lattice_d[1 + xi + (yi + 1) * Constants::N].x, weightBottomRight * mass);
+                        atomicAdd(&lattice_d[xi + yi * N].x, weightCurrent * mass);
+                        atomicAdd(&lattice_d[1 + xi + yi * N].x, weightRight * mass);
+                        atomicAdd(&lattice_d[xi + (yi + 1) * N].x, weightBottom * mass);
+                        atomicAdd(&lattice_d[1 + xi + (yi + 1) * N].x, weightBottomRight * mass);
                     } else {
-                        atomicAdd(&lattice_d[xi + yi * Constants::N].x, mass);
+                        atomicAdd(&lattice_d[xi + yi * N].x, mass);
                     }
                 }
             }
@@ -736,13 +732,17 @@ namespace Kernels {
     __device__ float smoothMin;
     __device__ float smoothMax;
     __global__ void k_initSmoothMinMax() {
-        smoothMin = 0.0f;
-        smoothMax = 0.0f;
+        smoothMin = 1e35f;
+        smoothMax = -1.0f;
     }
     __global__ void k_smoothMinMax() {
-        constexpr float alpha = 0.15f;
-        smoothMin = (1.0f - alpha) * smoothMin + alpha * minVar;
-        smoothMax = (1.0f - alpha) * smoothMax + alpha * maxVar;
+        constexpr float alpha = 0.4f;
+        if (smoothMin > minVar) {
+            smoothMin = minVar;
+        }
+        if (smoothMax < maxVar) {
+            smoothMax = maxVar;
+        }
     }
     template<int N>
     __global__ void k_scaleWithMinMax(float* input_d, float* output_d) {
@@ -757,12 +757,7 @@ namespace Kernels {
             const int index = ii * numTotalThreads + globalThread;
             if (index < N * N) {
                 const float diff = smoothMax - smoothMin;
-                if (diff > 0.0f) {
-                    output_d[index] = powf((input_d[index] - smoothMin) / diff, 0.25f);
-                }
-                else {
-                    output_d[index] = 0.0f;
-                }
+                output_d[index] = powf((input_d[index] - smoothMin) / diff, 0.05f);
             }
         }
     }
@@ -770,7 +765,7 @@ namespace Kernels {
     __constant__ float shortRangeGravKern_c[Constants::LOCAL_CONV_WIDTH * Constants::LOCAL_CONV_WIDTH];
     __constant__ float renderBlurKern_c[Constants::BLUR_R * Constants::BLUR_R];
     constexpr int TILE_SIZE = 32;
-    template< int K>
+    template<int K, int N>
     __global__ void k_calcLocalMassConvolution(const float* const __restrict__ latticeIn_d, float* const __restrict__ latticeOut_d) {
         const int threadX = threadIdx.x;
         const int threadY = threadIdx.y;
@@ -780,8 +775,8 @@ namespace Kernels {
         const int numThreadsY = blockDim.y;
         const int numBlocksX = gridDim.x;
         const int numBlocksY = gridDim.y;
-        const int numTilesPerX = Constants::N / TILE_SIZE;
-        const int numTilesPerY = Constants::N / TILE_SIZE;
+        const int numTilesPerX = N / TILE_SIZE;
+        const int numTilesPerY = N / TILE_SIZE;
         constexpr int tileElements = (TILE_SIZE + K) * (TILE_SIZE + K);
         const int tileLoadSteps = (tileElements + numThreadsX * numThreadsY - 1) / (numThreadsX * numThreadsY);
         constexpr int halfK = (K - 1) / 2;
@@ -790,7 +785,7 @@ namespace Kernels {
             for (int tileX = 0; tileX < numTilesPerX / numBlocksX; tileX++) {
                 const int tileXX = tileX * numBlocksX + blockX;
                 const int tileYY = tileY * numBlocksY + blockY;
-                const int tileOffset = tileXX * TILE_SIZE + tileYY * TILE_SIZE * Constants::N;
+                const int tileOffset = tileXX * TILE_SIZE + tileYY * TILE_SIZE * N;
                 #pragma unroll
                 for (int load = 0; load < tileLoadSteps; load++) {
                     const int loadT = load * numThreadsX * numThreadsY + threadX + threadY * numThreadsX;
@@ -799,9 +794,9 @@ namespace Kernels {
 
                     const int loaded = loadedX + loadedY * (TILE_SIZE + K);
                     if (loadedY < (TILE_SIZE + K) && loadedX < (TILE_SIZE + K)) {
-                        if (loadedX + tileXX * TILE_SIZE - halfK >= 0 && loadedX + tileXX * TILE_SIZE - halfK < Constants::N &&
-                            loadedY + tileYY * TILE_SIZE - halfK >= 0 && loadedY + tileYY * TILE_SIZE - halfK < Constants::N) {
-                            s_cache[loaded] = __ldg(&latticeIn_d[tileOffset + loadedX - halfK + (loadedY - halfK) * Constants::N]);
+                        if (loadedX + tileXX * TILE_SIZE - halfK >= 0 && loadedX + tileXX * TILE_SIZE - halfK < N &&
+                            loadedY + tileYY * TILE_SIZE - halfK >= 0 && loadedY + tileYY * TILE_SIZE - halfK < N) {
+                            s_cache[loaded] = __ldg(&latticeIn_d[tileOffset + loadedX - halfK + (loadedY - halfK) * N]);
                         }
                         else {
                             s_cache[loaded] = 0.0f;
@@ -821,11 +816,11 @@ namespace Kernels {
                     }
                 }
                 __syncthreads();
-                latticeOut_d[tileOffset + threadX + threadY * Constants::N] = acc[0] + acc[1];
+                latticeOut_d[tileOffset + threadX + threadY * N] = acc[0] + acc[1];
             }
         }
     }
-    template< int K>
+    template<int K, int N>
     __global__ void k_calcBlurConvolution(const float* const __restrict__ latticeIn_d, float* const __restrict__ latticeOut_d) {
         const int threadX = threadIdx.x;
         const int threadY = threadIdx.y;
@@ -835,8 +830,8 @@ namespace Kernels {
         const int numThreadsY = blockDim.y;
         const int numBlocksX = gridDim.x;
         const int numBlocksY = gridDim.y;
-        const int numTilesPerX = Constants::N / TILE_SIZE;
-        const int numTilesPerY = Constants::N / TILE_SIZE;
+        const int numTilesPerX = N / TILE_SIZE;
+        const int numTilesPerY = N / TILE_SIZE;
         constexpr int tileElements = (TILE_SIZE + K) * (TILE_SIZE + K);
         const int tileLoadSteps = (tileElements + numThreadsX * numThreadsY - 1) / (numThreadsX * numThreadsY);
         constexpr int halfK = (K - 1) / 2;
@@ -845,7 +840,7 @@ namespace Kernels {
             for (int tileX = 0; tileX < numTilesPerX / numBlocksX; tileX++) {
                 const int tileXX = tileX * numBlocksX + blockX;
                 const int tileYY = tileY * numBlocksY + blockY;
-                const int tileOffset = tileXX * TILE_SIZE + tileYY * TILE_SIZE * Constants::N;
+                const int tileOffset = tileXX * TILE_SIZE + tileYY * TILE_SIZE * N;
                 #pragma unroll
                 for (int load = 0; load < tileLoadSteps; load++) {
                     const int loadT = load * numThreadsX * numThreadsY + threadX + threadY * numThreadsX;
@@ -854,9 +849,9 @@ namespace Kernels {
 
                     const int loaded = loadedX + loadedY * (TILE_SIZE + K);
                     if (loadedY < (TILE_SIZE + K) && loadedX < (TILE_SIZE + K)) {
-                        if (loadedX + tileXX * TILE_SIZE - halfK >= 0 && loadedX + tileXX * TILE_SIZE - halfK < Constants::N &&
-                            loadedY + tileYY * TILE_SIZE - halfK >= 0 && loadedY + tileYY * TILE_SIZE - halfK < Constants::N) {
-                            s_cache[loaded] = __ldg(&latticeIn_d[tileOffset + loadedX - halfK + (loadedY - halfK) * Constants::N]);
+                        if (loadedX + tileXX * TILE_SIZE - halfK >= 0 && loadedX + tileXX * TILE_SIZE - halfK < N &&
+                            loadedY + tileYY * TILE_SIZE - halfK >= 0 && loadedY + tileYY * TILE_SIZE - halfK < N) {
+                            s_cache[loaded] = __ldg(&latticeIn_d[tileOffset + loadedX - halfK + (loadedY - halfK) * N]);
                         }
                         else {
                             s_cache[loaded] = 0.0f;
@@ -876,12 +871,11 @@ namespace Kernels {
                     }
                 }
                 __syncthreads();
-                latticeOut_d[tileOffset + threadX + threadY * Constants::N] = acc[0] + acc[1];
+                latticeOut_d[tileOffset + threadX + threadY * N] = acc[0] + acc[1];
             }
         }
     }
 }
-
 
 struct Universe {
 private:
@@ -951,8 +945,9 @@ public:
             for (int ix = -HALF_WIDTH; ix <= HALF_WIDTH; ix++) {
                 const int index = ix + HALF_WIDTH + (iy + HALF_WIDTH) * Constants::LOCAL_CONV_WIDTH;
                 const double r = sqrt((double)(ix * ix + iy * iy));
+                float mult = (Constants::N / 2048.0f) * (Constants::N / 2048.0f);
                 if (r > 2.0 && r < HALF_WIDTH) {
-                    localForceFilter[index] = 1.0f / r;
+                    localForceFilter[index] = mult / r;
                 }
                 else {
                     localForceFilter[index] = 0.0f;
@@ -965,11 +960,11 @@ public:
             for (int ix = -Constants::BLUR_HALF_R; ix <= Constants::BLUR_HALF_R; ix++) {
                 const int index = ix + Constants::BLUR_HALF_R + (iy + Constants::BLUR_HALF_R) * Constants::BLUR_R;
                 const double r = sqrt((double)(ix * ix + iy * iy));
-                if (r > 1.0 && r < Constants::BLUR_HALF_R) {
-                    renderFilter[index] = 1.0f / r;
+                if (r < Constants::BLUR_HALF_R) {
+                    renderFilter[index] = 1.0f / (r + 1.0f);
                 }
                 else {
-                    renderFilter[index] = 1.0f;
+                    renderFilter[index] = 0.0f;
                 }
             }
         }
@@ -1030,23 +1025,40 @@ public:
         particleCounter = 0;
     }
     // Adds a galaxy with n particles, with center at (centerX, centerY) normalized coordinates.
-    void addGalaxy(int n, float normalizedCenterX = 0.5f, float normalizedCenterY = 0.5f, float angularVelocity = 1.0f, float massPerParticle = 1.0f, float normalizedRadius = 0.3f, float centerOfMassVelocityX = 0.0f, float centerOfMassVelocityY = 0.0f) {
+    void addGalaxy(int n, float normalizedCenterX = 0.5f, float normalizedCenterY = 0.5f, float angularVelocity = 1.0f, float massPerParticle = 1.0f, float normalizedRadius = 0.3f, float centerOfMassVelocityX = 0.0f, float centerOfMassVelocityY = 0.0f, bool blackHole = false) {
         const int maxCount = min(particleCounter + n, numParticles);
+        angularVelocity *= Constants::N;
+        angularVelocity /= 1024.0f;
         std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        const float radiusSquared = (Constants::N * normalizedRadius) * (Constants::N * normalizedRadius);
+        const float totalMass = massPerParticle * (maxCount - particleCounter) + (blackHole ? (maxCount - particleCounter) * massPerParticle / 1000.0f : 0.0f);
+
         for (int i = particleCounter; i < maxCount; i++) {
-            const float r = dist(rng) * (Constants::N * normalizedRadius);
+            const float r = (0.1f + 0.9f * dist(rng)) * (Constants::N * normalizedRadius);
             const float a = Constants::MATH_PI * 2.0 * dist(rng);
+            const float characteristicSpeedScaling = sqrtf(0.0000044f * totalMass * r / radiusSquared);
             // orbit position
             x[i] = r * cos(a) + normalizedCenterX * Constants::N;
             y[i] = r * sin(a) + normalizedCenterY * Constants::N;
             const float vecX = x[i] - normalizedCenterX * Constants::N;
             const float vecY = y[i] - normalizedCenterY * Constants::N;
             // orbit velocity
-            vx[i] = vecY * angularVelocity + centerOfMassVelocityX * Constants::N;
-            vy[i] = -vecX * angularVelocity + centerOfMassVelocityY * Constants::N;
+            vx[i] = (vecY * angularVelocity) * characteristicSpeedScaling  + centerOfMassVelocityX * Constants::N;
+            vy[i] = (-vecX * angularVelocity)* characteristicSpeedScaling + centerOfMassVelocityY * Constants::N;
             m[i] = massPerParticle;
+
+            if (i == maxCount - 1) {
+                if (blackHole) {
+                    x[i] = normalizedCenterX * Constants::N;
+                    y[i] = normalizedCenterY * Constants::N;
+                    vx[i] = centerOfMassVelocityX * Constants::N;
+                    vy[i] = centerOfMassVelocityY * Constants::N;
+                    m[i] = (maxCount - particleCounter) * massPerParticle / 1000.0f;
+                }
+            }
         }
         particleCounter = maxCount;
+
         gpuErrchk(cudaMemcpy(x_d, x.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(y_d, y.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
         gpuErrchk(cudaMemcpy(vx_d, vx.data(), sizeof(float) * numParticles, cudaMemcpyHostToDevice));
@@ -1060,7 +1072,7 @@ private:
         Kernels::k_scatterMassOnLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, x_d, y_d, m_d, numParticles, accuracy);
         if (nbodyCalcCounter == numNbodyStepsPerRender - 1) {
             Kernels::k_getRealComponentOfLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, renderOutput_d);
-            Kernels::k_calcBlurConvolution<Constants::BLUR_R><<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::BLUR_R + Kernels::TILE_SIZE)* (Constants::BLUR_R + Kernels::TILE_SIZE) >> > (renderOutput_d, renderOutput2_d);
+            Kernels::k_calcBlurConvolution<Constants::BLUR_R, Constants::N><<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::BLUR_R + Kernels::TILE_SIZE)* (Constants::BLUR_R + Kernels::TILE_SIZE) >> > (renderOutput_d, renderOutput2_d);
             Kernels::k_resetMinMax<<<1, 1>>>();
             Kernels::k_calcMinMax<Constants::N><<<numBlocks, Constants::THREADS>>>(renderOutput2_d);
             Kernels::k_smoothMinMax<<<1, 1>>>();
@@ -1069,7 +1081,7 @@ private:
         // Accuracy mode also adds a short-range force component using normal convolution.
         if (accuracy) {
             Kernels::k_getRealComponentOfLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, localForceLattice_d);
-            Kernels::k_calcLocalMassConvolution<Constants::LOCAL_CONV_WIDTH> <<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE) >> > (localForceLattice_d, localForceLatticeResult_d);
+            Kernels::k_calcLocalMassConvolution<Constants::LOCAL_CONV_WIDTH, Constants::N> <<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE) >> > (localForceLattice_d, localForceLatticeResult_d);
         }
     }
     void calcLatticeFft2D() {
@@ -1104,7 +1116,7 @@ private:
     void multiSampleForces() {
         Kernels::k_shiftLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(lattice_d, localForceLatticeResult_d, latticeShifted_d, accuracy);
         Kernels::k_calcGradientLattice<Constants::N><<<numBlocks, Constants::THREADS>>>(latticeShifted_d, latticeShiftedForceXY_d);
-        Kernels::k_forceMultiSampling<Constants::N><<<numBlocks, Constants::THREADS>>>(latticeShiftedForceXY_d, x_d, y_d, vx_d, vy_d, m_d, numParticles, accuracy);
+        Kernels::k_forceMultiSampling<Constants::N><<<numBlocks, Constants::THREADS>>>(latticeShiftedForceXY_d, x_d, y_d, vx_d, vy_d, numParticles, accuracy);
     }
     std::mutex lock;
     std::vector<std::vector<float>> frames;

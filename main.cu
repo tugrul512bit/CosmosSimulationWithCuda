@@ -2,21 +2,22 @@
 #include <opencv2/opencv.hpp>
 #include <thread>
 // Constants that can be changed:
-// Constants::THREADS
-// Constants::dt
-// Constants::MAX_FRAMES_BUFFERED
+// Constants::N --> lattice size
+// Constants::THREADS --> cuda threads per cuda block
+// Constants::dt --> time step
+// Constants::MAX_FRAMES_BUFFERED --> maximum number of frames stored in queue
 
 int main() {
     cv::namedWindow("Fast Nbody");
-
-    const int numNbodySimulationsPerRender = 2;
+    // Multiple time-steps can be computed before each render.
+    const int numNbodySimulationsPerRender = 1;
     // 100M particles require 2.5GB memory
     const int maximumParticles = 1000 * 1000 * 24;
     // cuda device index
     const int device = 0;
     // true = more performance + single force sampling + single mass projection + pure FFT convolution
     // false = multi sampled forces per particle + multi-point mass projection per particle + FFT + local convolution
-    const bool lowAccuracy = false;
+    const bool lowAccuracy = true;
     // Window width/height
     const int w = 1340;
     const int h = 1340;
@@ -28,15 +29,16 @@ int main() {
         const int numParticlesPerGalaxy = 1000 * 1000 * 12;
         const float centerOfGalaxyX = 0.25f;
         const float centerOfGalaxyY = 0.25f;
-        const float angularVelocityOfGalaxy = 0.7f;
-        const float massPerParticle = 0.01f;
+        const float angularVelocityOfGalaxy = 1.0f;
+        const float massPerParticle = 1.0f;
         const float radiusOfGalaxy = 0.2f;
         const float firstGalaxyCenterOfMassVelocityX = 0.01f;
         const float firstGalaxyCenterOfMassVelocityY = 0.01f;
         const float secondGalaxyCenterOfMassVelocityX = -0.02f;
         const float secondGalaxyCenterOfMassVelocityY = -0.02f;
-        cosmos.addGalaxy(numParticlesPerGalaxy, centerOfGalaxyX, centerOfGalaxyY, angularVelocityOfGalaxy, massPerParticle, radiusOfGalaxy, firstGalaxyCenterOfMassVelocityX, firstGalaxyCenterOfMassVelocityY);
-        cosmos.addGalaxy(numParticlesPerGalaxy, centerOfGalaxyX + 0.50f, centerOfGalaxyY + 0.50f, angularVelocityOfGalaxy, massPerParticle, radiusOfGalaxy, secondGalaxyCenterOfMassVelocityX, secondGalaxyCenterOfMassVelocityY);
+        const bool addBlackHoleToCenter = true;
+        cosmos.addGalaxy(numParticlesPerGalaxy, centerOfGalaxyX, centerOfGalaxyY, angularVelocityOfGalaxy, massPerParticle, radiusOfGalaxy, firstGalaxyCenterOfMassVelocityX, firstGalaxyCenterOfMassVelocityY, addBlackHoleToCenter);
+        cosmos.addGalaxy(numParticlesPerGalaxy, centerOfGalaxyX + 0.50f, centerOfGalaxyY + 0.50f, angularVelocityOfGalaxy, massPerParticle, radiusOfGalaxy, secondGalaxyCenterOfMassVelocityX, secondGalaxyCenterOfMassVelocityY, addBlackHoleToCenter);
     }
     // For rendering output.
     cv::Mat mat = cv::Mat(cv::Size2i(cosmos.getLatticeSize(), cosmos.getLatticeSize()), CV_32FC1);
