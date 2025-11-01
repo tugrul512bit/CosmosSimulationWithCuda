@@ -2,7 +2,7 @@
 #include <opencv2/opencv.hpp>
 #include <thread>
 // Constants that can be changed:
-// Constants::NUM_CUDA_DEVICES --> 1 for single GPU, N for N GPUs (maximum 4 is suggested for PCIE v5.0 x16 lanes)
+// Constants::NUM_CUDA_DEVICES --> 1 for single GPU, N for more GPUs (maximum 4 is suggested for PCIE v5.0 x16 lanes)
 // Constants::N --> lattice size
 // Constants::THREADS --> cuda threads per cuda block
 // Constants::dt --> time step
@@ -13,7 +13,7 @@ int main() {
     // Multiple time-steps can be computed before each render.
     const int numNbodySimulationsPerRender = 1;
     // 500M particles require 18.5GB memory. Distributed to multiple gpus (in same ratio with devicePerformance[Constants::NUM_CUDA_DEVICES]).
-    const int maximumParticles = 1000 * 1000 * 50;
+    const int maximumParticles = 1000 * 1000 * 40;
     // Indices of CUDA devices to use. When both are same, single device computes all particles. When different devices selected, load-balancing between two devices is made.
     // The algorithm is only scalable to few GPUs for simplicity.
     // Use device index with fastest PCIE connection as the first value here (in case of multi-gpu)
@@ -23,7 +23,7 @@ int main() {
     // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 0 }; -----------------------------------> Single GPU but has extra i/o that is overlapped with compute
     const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 0 };
     // Expected relative performance of devices. It's normalized internally so it can be anything like { 0.2f, 3.0f } or { 0.5f, 0.5f }
-    const float devicePerformance[Constants::NUM_CUDA_DEVICES] = { 0.75f, 0.5f };
+    const float devicePerformance[Constants::NUM_CUDA_DEVICES] = { 0.5f, 0.5f };
     // true = more performance + single force sampling + single mass projection + pure FFT convolution
     // false = multi sampled forces per particle + multi-point mass projection per particle + FFT + local convolution
     const bool lowAccuracy = true;
@@ -35,7 +35,7 @@ int main() {
     if (galaxyCollisionScenario) {
         cosmos.clear();
         // Creating two galaxies in a collision course.
-        const int numParticlesPerGalaxy = 1000 * 1000 * 25;
+        const int numParticlesPerGalaxy = 1000 * 1000 * 20;
         const float centerOfGalaxyX = 0.25f;
         const float centerOfGalaxyY = 0.25f;
         const float angularVelocityOfGalaxy = 1.0f;
