@@ -12,21 +12,24 @@ int main() {
     // Multiple time-steps can be computed before each render.
     const int numNbodySimulationsPerRender = 1;
     // 100M particles require 2.5GB memory
-    const int maximumParticles = 1000 * 1000 * 24;
-    // cuda device index
-    const int device = 0;
+    const int maximumParticles = 1000 * 1000 * 50;
+    // Indices of CUDA devices to use. When both are same, single device computes all particles. When different devices selected, load-balancing between two devices is made.
+    // The algorithm is only scalable to few GPUs for simplicity.
+    // Use device index with fastest PCIE connection as the first value here (in case of multi-gpu)
+    // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 1, 0 }; if device=1 has faster PCIE!
+    const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 0 };
     // true = more performance + single force sampling + single mass projection + pure FFT convolution
     // false = multi sampled forces per particle + multi-point mass projection per particle + FFT + local convolution
     const bool lowAccuracy = true;
     // Window width/height
     const int w = 1340;
     const int h = 1340;
-    Universe cosmos(maximumParticles, device, lowAccuracy, numNbodySimulationsPerRender);
+    Universe cosmos(maximumParticles, deviceIndex, lowAccuracy, numNbodySimulationsPerRender);
     const bool galaxyCollisionScenario = true;
     if (galaxyCollisionScenario) {
         cosmos.clear();
         // Creating two galaxies in a collision course.
-        const int numParticlesPerGalaxy = 1000 * 1000 * 12;
+        const int numParticlesPerGalaxy = 1000 * 1000 * 25;
         const float centerOfGalaxyX = 0.25f;
         const float centerOfGalaxyY = 0.25f;
         const float angularVelocityOfGalaxy = 1.0f;
