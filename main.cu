@@ -12,7 +12,7 @@ int main() {
     cv::namedWindow("Fast Nbody");
     // Multiple time-steps can be computed before each render.
     const int numNbodySimulationsPerRender = 1;
-    // 100M particles require 2.5GB memory
+    // 500M particles require 18.5GB memory. Distributed to multiple gpus (in same ratio with devicePerformance[Constants::NUM_CUDA_DEVICES]).
     const int maximumParticles = 1000 * 1000 * 50;
     // Indices of CUDA devices to use. When both are same, single device computes all particles. When different devices selected, load-balancing between two devices is made.
     // The algorithm is only scalable to few GPUs for simplicity.
@@ -20,7 +20,7 @@ int main() {
     // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 1, 0 }; if device=1 has faster PCIE -------> Multi GPU
     // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 1 }; if device=0 has faster PCIE -------> Multi GPU
     // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0 }; --------------------------------------> Single GPU
-    // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 0 }; -----------------------------------> Single GPU but has extra i/o that is overlapped
+    // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 0 }; -----------------------------------> Single GPU but has extra i/o that is overlapped with compute
     const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 0 };
     // Expected relative performance of devices. It's normalized internally so it can be anything like { 0.2f, 3.0f } or { 0.5f, 0.5f }
     const float devicePerformance[Constants::NUM_CUDA_DEVICES] = { 0.75f, 0.5f };
