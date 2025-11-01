@@ -553,10 +553,6 @@ namespace Kernels {
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < N * N) {
-                const int x = index % N;
-                const int y = index / N;
-                const int shiftedX = (x - N / 2 + N * 2) % N;
-                const int shiftedY = (y - N / 2 + N * 2) % N;
                 if (accuracy) {
                     latticeShifted_d[index] = lattice_d[index].x + latticeLocal_d[index];
                 }
@@ -594,7 +590,6 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (numParticles + numTotalThreads - 1) / numTotalThreads;
-        const int balancedIndex = thread & 1;
         #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
@@ -743,7 +738,10 @@ namespace Kernels {
             s_min[warp] = localMin;
             s_max[warp] = localMax;
         }
+        __syncthreads();
         if (warp == 0) {
+            localMin = (lane < (numThreads >> 5)) ? s_min[lane] : 0.0f;
+            localMax = (lane < (numThreads >> 5)) ? s_max[lane] : 0.0f;
             float gather = __shfl_down_sync(0xFFFFFFFF, localMin, 16);
             localMin = (lane < 16) ? ((gather < localMin) ? gather : localMin) : localMin;
             gather = __shfl_down_sync(0xFFFFFFFF, localMin, 8);
@@ -776,7 +774,6 @@ namespace Kernels {
         smoothMax = -1.0f;
     }
     __global__ void k_smoothMinMax() {
-        constexpr float alpha = 0.4f;
         if (smoothMin > minVar) {
             smoothMin = minVar;
         }
@@ -968,19 +965,24 @@ private:
     int popCtr;
     bool working;
 
-    // Load-balancing.
-    float loadBalance;
+
 public:
-    Universe(int particles, const int cudaDevices[Constants::NUM_CUDA_DEVICES], bool lowAccuracy, int numStepsPerRender) {
-        loadBalance = 1.0f / Constants::NUM_CUDA_DEVICES;
+    Universe(int particles, const int (&cudaDevices)[Constants::NUM_CUDA_DEVICES], const float(&devicePerformances)[Constants::NUM_CUDA_DEVICES], bool lowAccuracy, int numStepsPerRender) {
+        float totalPerf = 0.0f;
+        float perf[Constants::NUM_CUDA_DEVICES];
+        for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
+            totalPerf += (fabsf(devicePerformances[device]) + 0.0001f);
+        }
+        for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
+            perf[device] = (fabsf(devicePerformances[device]) + 0.0001f) / totalPerf;
+        }
         accuracy = !lowAccuracy;
         particleCounter = 0;
         nbodyCalcCounter = 0;
         srand(time(0));
         int total = 0;
-        int offset = 0;
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-            numParticles[device] = particles * loadBalance;
+            numParticles[device] = particles * perf[device];
             total += numParticles[device];
         }
         int selector = 0;

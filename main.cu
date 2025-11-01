@@ -22,13 +22,15 @@ int main() {
     // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0 }; --------------------------------------> Single GPU
     // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 0 }; -----------------------------------> Single GPU but has extra i/o that is overlapped
     const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 0 };
+    // Expected relative performance of devices. It's normalized internally so it can be anything like { 0.2f, 3.0f } or { 0.5f, 0.5f }
+    const float devicePerformance[Constants::NUM_CUDA_DEVICES] = { 0.75f, 0.5f };
     // true = more performance + single force sampling + single mass projection + pure FFT convolution
     // false = multi sampled forces per particle + multi-point mass projection per particle + FFT + local convolution
     const bool lowAccuracy = true;
     // Window width/height
     const int w = 1340;
     const int h = 1340;
-    Universe cosmos(maximumParticles, deviceIndex, lowAccuracy, numNbodySimulationsPerRender);
+    Universe cosmos(maximumParticles, deviceIndex, devicePerformance, lowAccuracy, numNbodySimulationsPerRender);
     const bool galaxyCollisionScenario = true;
     if (galaxyCollisionScenario) {
         cosmos.clear();
@@ -53,7 +55,6 @@ int main() {
     // Start nbody thread.
     cosmos.nBodyStartGeneratingFrames();
     // Asynchronously reading the generated frames.
-    int escTestCtr = 0;
     while(true){
         std::vector<float> frame = cosmos.popFrame();
 
