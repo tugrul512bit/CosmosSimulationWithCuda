@@ -2,10 +2,11 @@
 
 Real-time N-body algorithm with 500 million particles(18.5GB memory required), accelerated with CUDA.
 
+- Dependency: Single header-only project with OpenCV(for demo) and CUDA(for compute) APIs. Uses Vcpkg to load OpenCV.
 - Multi-GPU work distribution: particles are computed only in their own GPUs.
-- Double-buffering: to overlap I/O with computations as an asynchronous pipeline
-- Render double-buffering: frames are generated asynchronously to the user's thread, further hiding latency
-- Real-time performance for 500 million particles, with 2 main-stream CUDA GPUs
+- Double-buffering: to overlap I/O with computations as an asynchronous pipeline.
+- Render: frames are generated asynchronously and buffered to the user's thread, further hiding latency.
+- Real-time performance for 500 million particles, with 2 main-stream CUDA GPUs.
 
 ![time 1](/t1.png)
 ![time 2](/t2.png)
