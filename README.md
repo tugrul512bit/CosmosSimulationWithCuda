@@ -7,7 +7,7 @@ Real-time N-body algorithm with 500 million particles(18.5GB memory required), a
 - Double-buffering: to overlap I/O with computations as an asynchronous pipeline.
 - Render: frames are generated asynchronously and buffered to the user's thread, further hiding latency.
 - Real-time performance for 500 million particles, with 2 main-stream CUDA GPUs.
-
+![time 1](/cuda-streams.png)
 ![time 1](/t1.png)
 ![time 2](/t2.png)
 ![time 3](/t3.png)
