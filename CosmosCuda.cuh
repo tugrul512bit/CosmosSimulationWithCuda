@@ -934,17 +934,19 @@ private:
 
     // For device
     cudaStream_t computeStream[Constants::NUM_CUDA_DEVICES];
-    cudaStream_t latticeBroadcastStream[Constants::NUM_CUDA_DEVICES];
+    cudaStream_t broadcastStream[Constants::NUM_CUDA_DEVICES];
+    cudaEvent_t latticeBroadcastEvent[Constants::NUM_CUDA_DEVICES];
     cudaEvent_t eventStart[Constants::NUM_CUDA_DEVICES];
     cudaEvent_t eventStop[Constants::NUM_CUDA_DEVICES];
     ComplexVar* lattice_d[Constants::NUM_CUDA_DEVICES];
-    float* accumulator_d[Constants::NUM_CUDA_DEVICES];
-    float* accumulator2_d[Constants::NUM_CUDA_DEVICES][Constants::NUM_CUDA_DEVICES];
+    // 2: copies for double-buffering
+    float* accumulator_d[Constants::NUM_CUDA_DEVICES][2];
+    float* accumulator2_d[Constants::NUM_CUDA_DEVICES][2];
     float* latticeShifted_d[Constants::NUM_CUDA_DEVICES];
     float2* latticeShiftedForceXY_d[Constants::NUM_CUDA_DEVICES];
     ComplexVar* filter_d[Constants::NUM_CUDA_DEVICES];
-    float* x_d[Constants::NUM_CUDA_DEVICES];
-    float* y_d[Constants::NUM_CUDA_DEVICES];
+    float* x_d[Constants::NUM_CUDA_DEVICES][2];
+    float* y_d[Constants::NUM_CUDA_DEVICES][2];
     float* vx_d[Constants::NUM_CUDA_DEVICES];
     float* vy_d[Constants::NUM_CUDA_DEVICES];
     float* m_d[Constants::NUM_CUDA_DEVICES];
@@ -1050,6 +1052,8 @@ public:
 
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
             gpuErrchk(cudaStreamCreate(&computeStream[device]));
+            gpuErrchk(cudaStreamCreate(&broadcastStream[device]));
+            
             cudaDeviceProp prop;
             gpuErrchk(cudaGetDeviceProperties(&prop, cudaDeviceIndices[device]));
             int blocksPerSM = (prop.maxThreadsPerMultiProcessor + Constants::THREADS - 1) / Constants::THREADS;
@@ -1060,25 +1064,37 @@ public:
             
             gpuErrchk(cudaEventCreate(&eventStart[device]));
             gpuErrchk(cudaEventCreate(&eventStop[device]));
+            gpuErrchk(cudaEventCreate(&latticeBroadcastEvent[device]));
+            
             gpuErrchk(cudaMallocAsync(&lattice_d[device], sizeof(ComplexVar) * Constants::N * Constants::N, computeStream[device]));
             gpuErrchk(cudaMallocAsync(&localForceLattice_d[device], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
             gpuErrchk(cudaMallocAsync(&localForceLatticeResult_d[device], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
             gpuErrchk(cudaMallocAsync(&latticeShifted_d[device], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
             gpuErrchk(cudaMallocAsync(&latticeShiftedForceXY_d[device], sizeof(float2) * Constants::N * Constants::N, computeStream[device]));
             gpuErrchk(cudaMallocAsync(&filter_d[device], sizeof(ComplexVar) * Constants::N * Constants::N, computeStream[device]));
-            gpuErrchk(cudaMallocAsync(&x_d[device], sizeof(float) * numParticles[device], computeStream[device]));
-            gpuErrchk(cudaMallocAsync(&y_d[device], sizeof(float) * numParticles[device], computeStream[device]));
+            gpuErrchk(cudaMallocAsync(&x_d[device][0], sizeof(float) * numParticles[device], computeStream[device]));
+            gpuErrchk(cudaMallocAsync(&x_d[device][1], sizeof(float) * numParticles[device], computeStream[device]));
+            gpuErrchk(cudaMallocAsync(&y_d[device][0], sizeof(float) * numParticles[device], computeStream[device]));
+            gpuErrchk(cudaMallocAsync(&y_d[device][1], sizeof(float) * numParticles[device], computeStream[device]));
             gpuErrchk(cudaMallocAsync(&vx_d[device], sizeof(float) * numParticles[device], computeStream[device]));
             gpuErrchk(cudaMallocAsync(&vy_d[device], sizeof(float) * numParticles[device], computeStream[device]));
             gpuErrchk(cudaMallocAsync(&m_d[device], sizeof(float) * numParticles[device], computeStream[device]));
-            gpuErrchk(cudaMallocAsync(&accumulator_d[device], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
-            for (int device2 = 0; device2 < Constants::NUM_CUDA_DEVICES; device2++) {
-                gpuErrchk(cudaMallocAsync(&accumulator2_d[device][device2], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
-            }
+
+            gpuErrchk(cudaMallocAsync(&accumulator_d[device][0], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
+            gpuErrchk(cudaMallocAsync(&accumulator_d[device][1], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
+            gpuErrchk(cudaMallocAsync(&accumulator2_d[device][0], sizeof(float)* Constants::N * Constants::N, computeStream[device]));
+            gpuErrchk(cudaMallocAsync(&accumulator2_d[device][1], sizeof(float)* Constants::N * Constants::N, computeStream[device]));
+            gpuErrchk(cudaMemsetAsync(accumulator_d[device][0], 0, sizeof(float)* Constants::N* Constants::N, computeStream[device]));
+            gpuErrchk(cudaMemsetAsync(accumulator_d[device][1], 0, sizeof(float) * Constants::N * Constants::N, computeStream[device]));
+            gpuErrchk(cudaMemsetAsync(accumulator2_d[device][0], 0, sizeof(float) * Constants::N * Constants::N, computeStream[device]));
+            gpuErrchk(cudaMemsetAsync(accumulator2_d[device][1], 0, sizeof(float)* Constants::N* Constants::N, computeStream[device]));
+
             gpuErrchk(cudaMallocAsync(&renderOutput_d[device], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
             gpuErrchk(cudaMallocAsync(&renderOutput2_d[device], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
-            gpuErrchk(cudaMemcpyAsync(x_d[device], x.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
-            gpuErrchk(cudaMemcpyAsync(y_d[device], y.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
+            gpuErrchk(cudaMemcpyAsync(x_d[device][0], x.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
+            gpuErrchk(cudaMemcpyAsync(y_d[device][0], y.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
+            gpuErrchk(cudaMemcpyAsync(x_d[device][1], x.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
+            gpuErrchk(cudaMemcpyAsync(y_d[device][1], y.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
             gpuErrchk(cudaMemcpyAsync(vx_d[device], vx.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
             gpuErrchk(cudaMemcpyAsync(vy_d[device], vy.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
             gpuErrchk(cudaMemcpyAsync(m_d[device], m.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
@@ -1103,10 +1119,13 @@ public:
             x[i] = -10.0f;
             y[i] = -10.0f;
         }
+        doubleBufferingCtr = 0;
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-            gpuErrchk(cudaMemcpyAsync(x_d[device], x.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
-            gpuErrchk(cudaMemcpyAsync(y_d[device], y.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
+            gpuErrchk(cudaMemcpyAsync(x_d[device][0], x.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
+            gpuErrchk(cudaMemcpyAsync(y_d[device][0], y.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
+            gpuErrchk(cudaMemcpyAsync(x_d[device][1], x.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
+            gpuErrchk(cudaMemcpyAsync(y_d[device][1], y.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
         }
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
@@ -1148,10 +1167,13 @@ public:
             }
         }
         particleCounter = maxCount;
+        doubleBufferingCtr = 0;
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-            gpuErrchk(cudaMemcpyAsync(x_d[device], x.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
-            gpuErrchk(cudaMemcpyAsync(y_d[device], y.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
+            gpuErrchk(cudaMemcpyAsync(x_d[device][0], x.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
+            gpuErrchk(cudaMemcpyAsync(y_d[device][0], y.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
+            gpuErrchk(cudaMemcpyAsync(x_d[device][1], x.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
+            gpuErrchk(cudaMemcpyAsync(y_d[device][1], y.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
             gpuErrchk(cudaMemcpyAsync(vx_d[device], vx.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
             gpuErrchk(cudaMemcpyAsync(vy_d[device], vy.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
             gpuErrchk(cudaMemcpyAsync(m_d[device], m.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
@@ -1162,30 +1184,23 @@ public:
         }
     }
 private:
-    // todo: scatter on 9 cells per mass to improve accuracy more.
+    int doubleBufferingCtr;
     void scatterMassOnLattice() {
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-            Kernels::k_clearAccumulator<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >>>(accumulator_d[device]);
-            Kernels::k_scatterMassOnAccumulator<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >>>(accumulator_d[device], x_d[device], y_d[device], m_d[device], numParticles[device], accuracy);
-
+            gpuErrchk(cudaStreamSynchronize(computeStream[device]));
+            gpuErrchk(cudaStreamSynchronize(broadcastStream[device]));
+            Kernels::k_clearAccumulator<Constants::N><<<numBlocks[device], Constants::THREADS, 0, broadcastStream[device] >>>(accumulator_d[device][1 - (doubleBufferingCtr % 2)]);
+            Kernels::k_scatterMassOnAccumulator<Constants::N><<<numBlocks[device], Constants::THREADS, 0, broadcastStream[device] >>>(accumulator_d[device][1 - (doubleBufferingCtr % 2)], x_d[device][1 - (doubleBufferingCtr % 2)], y_d[device][1 - (doubleBufferingCtr % 2)], m_d[device], numParticles[device], accuracy);
         }
 
-        // Todo: use events to synchronize, rather than host sync
         // Device - device broadcast start
-        int sameIndices = 0;
-        for (int device = 0; device < Constants::NUM_CUDA_DEVICES - 1; device++) {
-            sameIndices += (cudaDeviceIndices[device] == cudaDeviceIndices[device + 1]);
-        }
-        // if devices are unique
-        if (sameIndices != (Constants::NUM_CUDA_DEVICES - 1)) {
+        if (Constants::NUM_CUDA_DEVICES > 1) {
             for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
                 gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-                gpuErrchk(cudaMemcpyAsync(broadcast_h + (device * Constants::N * Constants::N), accumulator_d[device], sizeof(float) * Constants::N * Constants::N, cudaMemcpyDeviceToHost, computeStream[device]));
-            }
-            for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-                gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-                gpuErrchk(cudaStreamSynchronize(computeStream[device]));
+
+                gpuErrchk(cudaMemcpyAsync(broadcast_h + (device * Constants::N * Constants::N), accumulator_d[device][1 - (doubleBufferingCtr % 2)], sizeof(float) * Constants::N * Constants::N, cudaMemcpyDeviceToHost, broadcastStream[device]));
+                gpuErrchk(cudaEventRecord(latticeBroadcastEvent[device], broadcastStream[device]));
             }
 
             for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
@@ -1194,52 +1209,32 @@ private:
                 for (int device2 = 0; device2 < Constants::NUM_CUDA_DEVICES; device2++) {
                     if (device != device2) {
                         // Copy each device's broadcast data, then sum.
-                        gpuErrchk(cudaMemcpyAsync(accumulator2_d[device][device2], broadcast_h + (device2 * Constants::N * Constants::N), sizeof(float) * Constants::N * Constants::N, cudaMemcpyHostToDevice, computeStream[device]));
-                        Kernels::k_sumAccumulators<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (accumulator_d[device], accumulator2_d[device][device2]);
-                    }
-                }
-            }
-        } else {
-            // if all are same device
-            for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-                gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-                for (int device2 = 0; device2 < Constants::NUM_CUDA_DEVICES; device2++) {
-                    if (device != device2) {
-                       // no need to read from host if same device
-                       gpuErrchk(cudaMemcpyAsync(accumulator2_d[device][device2], accumulator_d[device2], sizeof(float) * Constants::N * Constants::N, cudaMemcpyDeviceToDevice, computeStream[device]));
-                    }
-                }
-            }
-            for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-                gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-                gpuErrchk(cudaStreamSynchronize(computeStream[device]));
-            }
-            for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-                gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-                for (int device2 = 0; device2 < Constants::NUM_CUDA_DEVICES; device2++) {
-                    if (device != device2) {
-                        Kernels::k_sumAccumulators<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (accumulator_d[device], accumulator2_d[device][device2]);
+                        gpuErrchk(cudaStreamWaitEvent(broadcastStream[device], latticeBroadcastEvent[device2]));
+                        gpuErrchk(cudaMemcpyAsync(accumulator2_d[device][1 - (doubleBufferingCtr % 2)], broadcast_h + (device2 * Constants::N * Constants::N), sizeof(float) * Constants::N * Constants::N, cudaMemcpyHostToDevice, broadcastStream[device]));
+                        Kernels::k_sumAccumulators<Constants::N> << <numBlocks[device], Constants::THREADS, 0, broadcastStream[device] >> > (accumulator_d[device][1 - (doubleBufferingCtr % 2)], accumulator2_d[device][1 - (doubleBufferingCtr % 2)]);
                     }
                 }
             }
         }
         // Device - device broadcast stop
 
-        for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-            gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-            Kernels::k_copyAccumulatorIntoLattice<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (accumulator_d[device], lattice_d[device]);
-            if (nbodyCalcCounter == numNbodyStepsPerRender - 1) {
-                Kernels::k_getRealComponentOfLattice<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (lattice_d[device], renderOutput_d[device]);
-                Kernels::k_calcBlurConvolution<Constants::BLUR_R, Constants::N> << <dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::BLUR_R + Kernels::TILE_SIZE)* (Constants::BLUR_R + Kernels::TILE_SIZE), computeStream[device] >> > (renderOutput_d[device], renderOutput2_d[device]);
-                Kernels::k_resetMinMax << <1, 1, 0, computeStream[device] >> > ();
-                Kernels::k_calcMinMax<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (renderOutput2_d[device]);
-                Kernels::k_smoothMinMax << <1, 1, 0, computeStream[device] >> > ();
-                Kernels::k_scaleWithMinMax<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (renderOutput2_d[device], renderOutput_d[device]);
-            }
-            // Accuracy mode also adds a short-range force component using normal convolution.
-            if (accuracy) {
-                Kernels::k_getRealComponentOfLattice<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (lattice_d[device], localForceLattice_d[device]);
-                Kernels::k_calcLocalMassConvolution<Constants::LOCAL_CONV_WIDTH, Constants::N> << <dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE), computeStream[device] >> > (localForceLattice_d[device], localForceLatticeResult_d[device]);
+        if (doubleBufferingCtr > 0) {
+            for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
+                gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
+                Kernels::k_copyAccumulatorIntoLattice<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (accumulator_d[device][doubleBufferingCtr % 2], lattice_d[device]);
+                if (nbodyCalcCounter == numNbodyStepsPerRender - 1) {
+                    Kernels::k_getRealComponentOfLattice<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (lattice_d[device], renderOutput_d[device]);
+                    Kernels::k_calcBlurConvolution<Constants::BLUR_R, Constants::N> << <dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::BLUR_R + Kernels::TILE_SIZE)* (Constants::BLUR_R + Kernels::TILE_SIZE), computeStream[device] >> > (renderOutput_d[device], renderOutput2_d[device]);
+                    Kernels::k_resetMinMax << <1, 1, 0, computeStream[device] >> > ();
+                    Kernels::k_calcMinMax<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (renderOutput2_d[device]);
+                    Kernels::k_smoothMinMax << <1, 1, 0, computeStream[device] >> > ();
+                    Kernels::k_scaleWithMinMax<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (renderOutput2_d[device], renderOutput_d[device]);
+                }
+                // Accuracy mode also adds a short-range force component using normal convolution.
+                if (accuracy) {
+                    Kernels::k_getRealComponentOfLattice<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (lattice_d[device], localForceLattice_d[device]);
+                    Kernels::k_calcLocalMassConvolution<Constants::LOCAL_CONV_WIDTH, Constants::N> << <dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE), computeStream[device] >> > (localForceLattice_d[device], localForceLatticeResult_d[device]);
+                }
             }
         }
     }
@@ -1286,7 +1281,7 @@ private:
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
             Kernels::k_shiftLattice<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (lattice_d[device], localForceLatticeResult_d[device], latticeShifted_d[device], accuracy);
             Kernels::k_calcGradientLattice<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (latticeShifted_d[device], latticeShiftedForceXY_d[device]);
-            Kernels::k_forceMultiSampling<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (latticeShiftedForceXY_d[device], x_d[device], y_d[device], vx_d[device], vy_d[device], numParticles[device], accuracy);
+            Kernels::k_forceMultiSampling<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (latticeShiftedForceXY_d[device], x_d[device][doubleBufferingCtr % 2], y_d[device][doubleBufferingCtr % 2], vx_d[device], vy_d[device], numParticles[device], accuracy);
         }
     }
 
@@ -1318,6 +1313,7 @@ private:
         
         computeThread = std::thread([&]() {
             bool workingTmp = true;
+            doubleBufferingCtr = 0;
             while (workingTmp) {
                 if (nbodyCalcCounter == 0) {
                     for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
@@ -1326,10 +1322,13 @@ private:
                     }
                 }
                 scatterMassOnLattice();
-                calcLatticeFft2D();
-                multiplyLatticeFilterElementwise();
-                calcLatticeIfft2D();
-                multiSampleForces();
+                if (doubleBufferingCtr > 0) {
+                    calcLatticeFft2D();
+                    multiplyLatticeFilterElementwise();
+                    calcLatticeIfft2D();
+                    multiSampleForces();
+                }
+                doubleBufferingCtr++;
                 nbodyCalcCounter++;
                 if (nbodyCalcCounter == numNbodyStepsPerRender) {
                     nbodyCalcCounter = 0;
@@ -1338,6 +1337,7 @@ private:
                         gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
                         gpuErrchk(cudaEventRecord(eventStop[device], computeStream[device]));
                         gpuErrchk(cudaStreamSynchronize(computeStream[device]));
+                        gpuErrchk(cudaStreamSynchronize(broadcastStream[device]));
                         float ms;
                         gpuErrchk(cudaEventElapsedTime(&ms, eventStart[device], eventStop[device]));
                         // Selecting longest completion time as total work time.
@@ -1377,17 +1377,19 @@ private:
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
             gpuErrchk(cudaFreeAsync(lattice_d[device], computeStream[device]));
-            gpuErrchk(cudaFreeAsync(accumulator_d[device], computeStream[device]));
-            for (int device2 = 0; device2 < Constants::NUM_CUDA_DEVICES; device2++) {
-                gpuErrchk(cudaFreeAsync(accumulator2_d[device][device2], computeStream[device]));
-            }
+            gpuErrchk(cudaFreeAsync(accumulator_d[device][0], computeStream[device]));
+            gpuErrchk(cudaFreeAsync(accumulator_d[device][1], computeStream[device]));
+            gpuErrchk(cudaFreeAsync(accumulator2_d[device][0], computeStream[device]));
+            gpuErrchk(cudaFreeAsync(accumulator2_d[device][1], computeStream[device]));
             gpuErrchk(cudaFreeAsync(localForceLattice_d[device], computeStream[device]));
             gpuErrchk(cudaFreeAsync(localForceLatticeResult_d[device], computeStream[device]));
             gpuErrchk(cudaFreeAsync(latticeShifted_d[device], computeStream[device]));
             gpuErrchk(cudaFreeAsync(latticeShiftedForceXY_d[device], computeStream[device]));
             gpuErrchk(cudaFreeAsync(filter_d[device], computeStream[device]));
-            gpuErrchk(cudaFreeAsync(x_d[device], computeStream[device]));
-            gpuErrchk(cudaFreeAsync(y_d[device], computeStream[device]));
+            gpuErrchk(cudaFreeAsync(x_d[device][0], computeStream[device]));
+            gpuErrchk(cudaFreeAsync(y_d[device][0], computeStream[device]));
+            gpuErrchk(cudaFreeAsync(x_d[device][1], computeStream[device]));
+            gpuErrchk(cudaFreeAsync(y_d[device][1], computeStream[device]));
             gpuErrchk(cudaFreeAsync(vx_d[device], computeStream[device]));
             gpuErrchk(cudaFreeAsync(vy_d[device], computeStream[device]));
             gpuErrchk(cudaFreeAsync(m_d[device], computeStream[device]));
@@ -1395,11 +1397,14 @@ private:
             gpuErrchk(cudaFreeAsync(renderOutput2_d[device], computeStream[device]));
             gpuErrchk(cudaEventDestroy(eventStart[device]));
             gpuErrchk(cudaEventDestroy(eventStop[device]));
+            gpuErrchk(cudaEventDestroy(latticeBroadcastEvent[device]));
         }
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
             gpuErrchk(cudaStreamSynchronize(computeStream[device]));
+            gpuErrchk(cudaStreamSynchronize(broadcastStream[device]));
             gpuErrchk(cudaStreamDestroy(computeStream[device]));
+            gpuErrchk(cudaStreamDestroy(broadcastStream[device]));
         }
         gpuErrchk(cudaFreeHost(broadcast_h));
         gpuErrchk(cudaFreeHost(frame_h));

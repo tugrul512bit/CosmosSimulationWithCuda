@@ -2,6 +2,7 @@
 #include <opencv2/opencv.hpp>
 #include <thread>
 // Constants that can be changed:
+// Constants::NUM_CUDA_DEVICES --> 1 for single GPU, N for N GPUs (maximum 4 is suggested for PCIE v5.0 x16 lanes)
 // Constants::N --> lattice size
 // Constants::THREADS --> cuda threads per cuda block
 // Constants::dt --> time step
@@ -16,7 +17,10 @@ int main() {
     // Indices of CUDA devices to use. When both are same, single device computes all particles. When different devices selected, load-balancing between two devices is made.
     // The algorithm is only scalable to few GPUs for simplicity.
     // Use device index with fastest PCIE connection as the first value here (in case of multi-gpu)
-    // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 1, 0 }; if device=1 has faster PCIE!
+    // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 1, 0 }; if device=1 has faster PCIE -------> Multi GPU
+    // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 1 }; if device=0 has faster PCIE -------> Multi GPU
+    // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0 }; --------------------------------------> Single GPU
+    // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 0 }; -----------------------------------> Single GPU but has extra i/o that is overlapped
     const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 0 };
     // true = more performance + single force sampling + single mass projection + pure FFT convolution
     // false = multi sampled forces per particle + multi-point mass projection per particle + FFT + local convolution
