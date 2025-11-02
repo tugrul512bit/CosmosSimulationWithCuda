@@ -1,6 +1,6 @@
 # CosmosSimulationWithCuda
 
-Real-time N-body algorithm with 500 million particles(18.5GB memory required), accelerated with CUDA.
+Real-time N-body algorithm for a billion particles (3.7GB memory per 100M particles required), accelerated with CUDA.
 
 - Dependency: Single header-only project with OpenCV(for demo) and CUDA(for compute) APIs. Uses Vcpkg to load OpenCV.
 - Multi-GPU work distribution: particles are computed only in their own GPUs.
