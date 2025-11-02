@@ -2,7 +2,7 @@
 #include <opencv2/opencv.hpp>
 #include <thread>
 // Constants that can be changed:
-// Constants::NUM_CUDA_DEVICES --> 1 for single GPU, N for more GPUs (maximum 4 is suggested for PCIE v5.0 x16 lanes)
+// Constants::NUM_CUDA_DEVICES --> 1 for single GPU, N for more GPUs.
 // Constants::N --> lattice size
 // Constants::THREADS --> cuda threads per cuda block
 // Constants::dt --> time step

@@ -582,7 +582,7 @@ namespace Kernels {
     }
 
     template<int N>
-    __global__ void k_scatterMassOnAccumulator(float* const __restrict__ accumulator_d, const float* x, const float* y, const float* m, const int numParticles, bool accuracy) {
+    __global__ void k_scatterMassOnAccumulator(float* const __restrict__ accumulator_d, const float4* const __restrict__ x, const float4* const __restrict__ y, const float4* const __restrict__ m, const int numParticles, bool accuracy) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -591,16 +591,46 @@ namespace Kernels {
         const int numTotalThreads = numThreads * numBlocks;
         const int numChunks = numParticles / 4;
         const int steps = (numChunks + numTotalThreads - 1) / numTotalThreads;
-        const float4* xChunkPtr = reinterpret_cast<const float4*>(&x[0]);
-        const float4* yChunkPtr = reinterpret_cast<const float4*>(&y[0]);
-        const float4* mChunkPtr = reinterpret_cast<const float4*>(&m[0]);
-        #pragma unroll
+
+#ifndef __CUDA_ARCH__
+#define __CUDA_ARCH__ 600
+#endif
+#if __CUDA_ARCH__ >= 800
+        __shared__ alignas(16) float4 s_xAsync[Constants::THREADS];
+        __shared__ alignas(16) float4 s_yAsync[Constants::THREADS];
+        __shared__ alignas(16) float4 s_mAsync[Constants::THREADS];
+        if (globalThread < numChunks) {
+            __pipeline_memcpy_async(&s_xAsync[thread], &x[globalThread], sizeof(float4));
+            __pipeline_memcpy_async(&s_yAsync[thread], &y[globalThread], sizeof(float4));
+            __pipeline_memcpy_async(&s_mAsync[thread], &m[globalThread], sizeof(float4));
+            __pipeline_commit();
+        }
+#endif
+        
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < numChunks) {
-                const float4 xf = __ldcs(&xChunkPtr[index]);
-                const float4 yf = __ldcs(&yChunkPtr[index]);
-                const float4 mass = __ldcs(&mChunkPtr[index]);
+                float4 xf;
+                float4 yf;
+                float4 mass;
+#if __CUDA_ARCH__ >= 800
+                __pipeline_wait_prior(0);
+                xf = s_xAsync[thread];
+                yf = s_yAsync[thread];
+                mass = s_mAsync[thread];
+                const int nextItem = index + numTotalThreads;
+                if (nextItem < numChunks) {
+                    __pipeline_memcpy_async(&s_xAsync[thread], &x[nextItem], sizeof(float4));
+                    __pipeline_memcpy_async(&s_yAsync[thread], &y[nextItem], sizeof(float4));
+                    __pipeline_memcpy_async(&s_mAsync[thread], &m[nextItem], sizeof(float4));
+                    __pipeline_commit();
+                }
+#else
+                xf = __ldcs(&x[index]);
+                yf = __ldcs(&y[index]);
+                mass = __ldcs(&m[index]);
+#endif
+
                 // particle 1
                 {
                     const int xi = xf.x;
@@ -1287,7 +1317,7 @@ private:
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
             Kernels::k_clearAccumulator<Constants::N><<<numBlocks[device], Constants::THREADS, 0, broadcastStream[device] >>>(accumulator_d[device][1 - (doubleBufferingCtr % 2)]);
-            Kernels::k_scatterMassOnAccumulator<Constants::N><<<numBlocks[device], Constants::THREADS, 0, broadcastStream[device] >>>(accumulator_d[device][1 - (doubleBufferingCtr % 2)], x_d[device][1 - (doubleBufferingCtr % 2)], y_d[device][1 - (doubleBufferingCtr % 2)], m_d[device], numParticles[device], accuracy);
+            Kernels::k_scatterMassOnAccumulator<Constants::N><<<numBlocks[device], Constants::THREADS, 0, broadcastStream[device] >>>(accumulator_d[device][1 - (doubleBufferingCtr % 2)], reinterpret_cast<float4*>(x_d[device][1 - (doubleBufferingCtr % 2)]), reinterpret_cast<float4*>(y_d[device][1 - (doubleBufferingCtr % 2)]), reinterpret_cast<float4*>(m_d[device]), numParticles[device], accuracy);
         }
 
         // Device - device broadcast start
