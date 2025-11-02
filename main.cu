@@ -1,14 +1,28 @@
-﻿#include "CosmosCuda.cuh"
-#include <opencv2/opencv.hpp>
+﻿#include <opencv2/opencv.hpp>
 #include <thread>
-// Constants that can be changed:
-// Constants::NUM_CUDA_DEVICES --> 1 for single GPU, N for more GPUs.
-// Constants::N --> lattice size
-// Constants::THREADS --> cuda threads per cuda block
-// Constants::dt --> time step
-// Constants::gravityMultiplier --> gravitational force multiplier (1.0f default)
-// Constants::MAX_FRAMES_BUFFERED --> maximum number of frames stored in queue
+// Optionally overriding the constants of simulation.
+#define __OVERRIDE_CONSTANTS__
+namespace OVERRIDE_CONSTANTS {
+    // Number of threads per CUDA block. This is for 1536 resident threads per SM. For older GPUs, 512 or 1024 can be chosen.
+    constexpr int THREADS = 768;
+    // Number of CUDA devices (max 2 tested)
+    constexpr int NUM_CUDA_DEVICES = 2;
 
+    // FFT uses these (long-range force calculation)
+    // N is width of lattice (N x N) and can be only a power of 2. Higher value increases accuracy at the cost of performance.
+    constexpr int N = 2048;
+
+    // Time-step of simulation. Lower values increase accuracy.
+    constexpr float dt = 0.002f;
+    // Force-multiplier for particles.
+    constexpr float gravityMultiplier = 1.0f;
+
+    // For render buffer output. Asynchronously filled.
+    constexpr int MAX_FRAMES_BUFFERED = 40;
+    // Blur radius in lattice-cell units
+    constexpr int BLUR_R = 3;
+}
+#include "CosmosCuda.cuh"
 int main() {
     cv::namedWindow("Fast Nbody");
     // Multiple time-steps can be computed before each render.

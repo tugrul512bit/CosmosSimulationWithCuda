@@ -23,6 +23,7 @@ inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort =
     }
 }
 using ComplexVar = float2;
+#ifndef __OVERRIDE_CONSTANTS__
 namespace Constants {
     // Number of threads per CUDA block. This is for 1536 resident threads per SM. For older GPUs, 512 or 1024 can be chosen.
     constexpr int THREADS = 768;
@@ -46,6 +47,31 @@ namespace Constants {
     constexpr int BLUR_R = 3;
     constexpr int BLUR_HALF_R = (BLUR_R - 1) / 2;
 }
+#else
+namespace Constants {
+    // Number of threads per CUDA block. This is for 1536 resident threads per SM. For older GPUs, 512 or 1024 can be chosen.
+    constexpr int THREADS = OVERRIDE_CONSTANTS::THREADS;
+    // Number of CUDA devices (max 2 tested)
+    constexpr int NUM_CUDA_DEVICES = OVERRIDE_CONSTANTS::NUM_CUDA_DEVICES;
+
+    // FFT uses these (long-range force calculation)
+    // N is width of lattice (N x N) and can be only a power of 2. Higher value increases accuracy at the cost of performance.
+    constexpr int N = OVERRIDE_CONSTANTS::N;
+    constexpr double MATH_PI = 3.14159265358979323846;
+    // Local convolution (short-range force calculation) to increase accuracy for high-accuracy mode. Only computes closest masses within LOCAL_CONV_WIDTH / 2 range.
+    constexpr int LOCAL_CONV_WIDTH = 33;
+
+    // Time-step of simulation. Lower values increase accuracy.
+    constexpr float dt = OVERRIDE_CONSTANTS::dt;
+    // Force-multiplier for particles.
+    constexpr float gravityMultiplier = OVERRIDE_CONSTANTS::gravityMultiplier;
+
+    // For render buffer output. Asynchronously filled.
+    constexpr int MAX_FRAMES_BUFFERED = OVERRIDE_CONSTANTS::MAX_FRAMES_BUFFERED;
+    constexpr int BLUR_R = OVERRIDE_CONSTANTS::BLUR_R;
+    constexpr int BLUR_HALF_R = (BLUR_R - 1) / 2;
+}
+#endif
 namespace Kernels {
     constexpr int SUB_MATRIX_SIZE = 32;
     constexpr int NUM_SUB_MATRICES_PER_DIMENSION = Constants::N / SUB_MATRIX_SIZE;
