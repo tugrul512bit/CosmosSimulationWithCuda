@@ -38,6 +38,8 @@ namespace Constants {
 
     // Time-step of simulation. Lower values increase accuracy.
     constexpr float dt = 0.002f;
+    // Force-multiplier for particles.
+    constexpr float gravityMultiplier = 1.0f;
 
     // For render buffer output. Asynchronously filled.
     constexpr int MAX_FRAMES_BUFFERED = 40;
@@ -433,7 +435,7 @@ namespace Kernels {
                 const float forceComponentX = (-rightRight + 8.0f * right - 8.0f * left + leftLeft) / (h * 12.0f);
                 const float forceComponentY = (-botBot + 8.0f * bot - 8.0f * top + topTop) / (h * 12.0f);
                 
-                latticeForceXY_d[index] = make_float2(forceComponentX, forceComponentY);
+                latticeForceXY_d[index] = make_float2(forceComponentX * Constants::gravityMultiplier, forceComponentY * Constants::gravityMultiplier);
             }
         }
     }

@@ -6,6 +6,7 @@
 // Constants::N --> lattice size
 // Constants::THREADS --> cuda threads per cuda block
 // Constants::dt --> time step
+// Constants::gravityMultiplier --> gravitational force multiplier (1.0f default)
 // Constants::MAX_FRAMES_BUFFERED --> maximum number of frames stored in queue
 
 int main() {
