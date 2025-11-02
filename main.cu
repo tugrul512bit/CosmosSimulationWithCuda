@@ -5,15 +5,15 @@
 namespace OVERRIDE_CONSTANTS {
     // Number of threads per CUDA block. This is for 1536 resident threads per SM. For older GPUs, 512 or 1024 can be chosen.
     constexpr int THREADS = 768;
-    // Number of CUDA devices (max 2 tested)
-    constexpr int NUM_CUDA_DEVICES = 2;
+    // Number of CUDA devices (max 2 tested). Increase this to use more gpus and choose relevant device index in deviceIndex parameter of Universe constructor. Also use performance hint inside devicePerformance parameter of constructor.
+    constexpr int NUM_CUDA_DEVICES = 1;
 
     // FFT uses these (long-range force calculation)
     // N is width of lattice (N x N) and can be only a power of 2. Higher value increases accuracy at the cost of performance.
     constexpr int N = 2048;
 
     // Time-step of simulation. Lower values increase accuracy.
-    constexpr float dt = 0.002f;
+    constexpr float dt = 0.001f;
     // Force-multiplier for particles.
     constexpr float gravityMultiplier = 1.0f;
 
@@ -36,9 +36,9 @@ int main() {
     // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 1 }; if device=0 has faster PCIE -------> Multi GPU
     // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0 }; --------------------------------------> Single GPU
     // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 0 }; -----------------------------------> Single GPU but has extra i/o that is overlapped with compute
-    const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 0 };
-    // Expected relative performance of devices. It's normalized internally.
-    const float devicePerformance[Constants::NUM_CUDA_DEVICES] = { 0.5f, 0.5f };
+    const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0 };
+    // Expected relative performance of devices. It's normalized internally. { 0.5f, 0.5f } for dual identical gpus, { 0.33f, 0.33f, 0.33f } for 3 identical gpus.
+    const float devicePerformance[Constants::NUM_CUDA_DEVICES] = { 1.0f };
     // true = more performance + single force sampling + single mass projection + pure FFT convolution
     // false = multi sampled forces per particle + multi-point mass projection per particle + FFT + local convolution
     const bool lowAccuracy = true;
@@ -80,17 +80,17 @@ int main() {
             // Copy lattice to opencv mat.
             const int n = frame.size() - 1;
             memcpy(mat.data, frame.data(), sizeof(float) * n);
-           
+
             cv::Mat resized;
             cv::Mat resizedColored;
             cv::resize(mat, resized, cv::Size(w, h), 0, 0, cv::INTER_LANCZOS4);
             resized.convertTo(resizedColored, CV_8UC3, 255.0f);
             cv::applyColorMap(resizedColored, resizedColored, cv::COLORMAP_JET);
             cv::imshow("Fast Nbody", resizedColored);
-            
+
             // ESC = exit
             if (cv::waitKey(1) == 27) {
-                    break;
+                break;
             }
         }
     }
