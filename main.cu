@@ -13,7 +13,7 @@ namespace OVERRIDE_CONSTANTS {
     constexpr int N = 2048;
 
     // Time-step of simulation. Lower values increase accuracy.
-    constexpr float dt = 0.001f;
+    constexpr float dt = 0.002f;
     // Force-multiplier for particles.
     constexpr float gravityMultiplier = 1.0f;
 
