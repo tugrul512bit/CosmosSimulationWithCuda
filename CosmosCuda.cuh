@@ -151,8 +151,6 @@ namespace Kernels {
                     }
                     d_calcWarpDft(vars[blc], warpLane, inverseMult, wCoefficients);
                 }
-
-                // todo: ping-pong buffer = less syncthreads, bigger input support
                 __syncthreads();
                 #pragma unroll
                 for (int blc = 0; blc < blockSteps; blc++) {
@@ -591,33 +589,116 @@ namespace Kernels {
         const int numThreads = blockDim.x;
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
-        const int steps = (numParticles + numTotalThreads - 1) / numTotalThreads;
+        const int numChunks = numParticles / 4;
+        const int steps = (numChunks + numTotalThreads - 1) / numTotalThreads;
+        const float4* xChunkPtr = reinterpret_cast<const float4*>(&x[0]);
+        const float4* yChunkPtr = reinterpret_cast<const float4*>(&y[0]);
+        const float4* mChunkPtr = reinterpret_cast<const float4*>(&m[0]);
         #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
-            if (index < numParticles) {
-                const float xf = __ldcs(&x[index]);
-                const float yf = __ldcs(&y[index]);
-                const float mass = __ldcs(&m[index]);
-                const int xi = xf;
-                const int yi = yf;
-                if (xi >= 1 && xi < N - 1 && yi >= 1 && yi < N - 1) {
-                    const float fractionalX = xf - xi;
-                    const float fractionalY = yf - yi;
-                    const float xDiff1 = 1.0f - fractionalX;
-                    const float yDiff1 = 1.0f - fractionalY;
-                    const float weightCurrent = xDiff1 * yDiff1;
-                    const float weightRight = fractionalX * yDiff1;
-                    const float weightBottom = xDiff1 * fractionalY;
-                    const float weightBottomRight = fractionalX * fractionalY;
-                    // Optional weighted scattering for more accuracy.
-                    if (accuracy) {
-                        atomicAdd(&accumulator_d[xi + yi * N], weightCurrent * mass);
-                        atomicAdd(&accumulator_d[1 + xi + yi * N], weightRight * mass);
-                        atomicAdd(&accumulator_d[xi + (yi + 1) * N], weightBottom * mass);
-                        atomicAdd(&accumulator_d[1 + xi + (yi + 1) * N], weightBottomRight * mass);
-                    } else {
-                        atomicAdd(&accumulator_d[xi + yi * N], mass);
+            if (index < numChunks) {
+                const float4 xf = __ldcs(&xChunkPtr[index]);
+                const float4 yf = __ldcs(&yChunkPtr[index]);
+                const float4 mass = __ldcs(&mChunkPtr[index]);
+                // particle 1
+                {
+                    const int xi = xf.x;
+                    const int yi = yf.x;
+                    if (xi >= 1 && xi < N - 1 && yi >= 1 && yi < N - 1) {
+                        const float fractionalX = xf.x - xi;
+                        const float fractionalY = yf.x - yi;
+                        const float xDiff1 = 1.0f - fractionalX;
+                        const float yDiff1 = 1.0f - fractionalY;
+                        const float weightCurrent = xDiff1 * yDiff1;
+                        const float weightRight = fractionalX * yDiff1;
+                        const float weightBottom = xDiff1 * fractionalY;
+                        const float weightBottomRight = fractionalX * fractionalY;
+                        // Optional weighted scattering for more accuracy.
+                        if (accuracy) {
+                            atomicAdd(&accumulator_d[xi + yi * N], weightCurrent * mass.x);
+                            atomicAdd(&accumulator_d[1 + xi + yi * N], weightRight * mass.x);
+                            atomicAdd(&accumulator_d[xi + (yi + 1) * N], weightBottom * mass.x);
+                            atomicAdd(&accumulator_d[1 + xi + (yi + 1) * N], weightBottomRight * mass.x);
+                        }
+                        else {
+                            atomicAdd(&accumulator_d[xi + yi * N], mass.x);
+                        }
+                    }
+                }
+                // particle 2
+                {
+                    const int xi = xf.y;
+                    const int yi = yf.y;
+                    if (xi >= 1 && xi < N - 1 && yi >= 1 && yi < N - 1) {
+                        const float fractionalX = xf.y - xi;
+                        const float fractionalY = yf.y - yi;
+                        const float xDiff1 = 1.0f - fractionalX;
+                        const float yDiff1 = 1.0f - fractionalY;
+                        const float weightCurrent = xDiff1 * yDiff1;
+                        const float weightRight = fractionalX * yDiff1;
+                        const float weightBottom = xDiff1 * fractionalY;
+                        const float weightBottomRight = fractionalX * fractionalY;
+                        // Optional weighted scattering for more accuracy.
+                        if (accuracy) {
+                            atomicAdd(&accumulator_d[xi + yi * N], weightCurrent * mass.y);
+                            atomicAdd(&accumulator_d[1 + xi + yi * N], weightRight * mass.y);
+                            atomicAdd(&accumulator_d[xi + (yi + 1) * N], weightBottom * mass.y);
+                            atomicAdd(&accumulator_d[1 + xi + (yi + 1) * N], weightBottomRight * mass.y);
+                        }
+                        else {
+                            atomicAdd(&accumulator_d[xi + yi * N], mass.y);
+                        }
+                    }
+                }
+                // particle 3
+                {
+                    const int xi = xf.z;
+                    const int yi = yf.z;
+                    if (xi >= 1 && xi < N - 1 && yi >= 1 && yi < N - 1) {
+                        const float fractionalX = xf.z - xi;
+                        const float fractionalY = yf.z - yi;
+                        const float xDiff1 = 1.0f - fractionalX;
+                        const float yDiff1 = 1.0f - fractionalY;
+                        const float weightCurrent = xDiff1 * yDiff1;
+                        const float weightRight = fractionalX * yDiff1;
+                        const float weightBottom = xDiff1 * fractionalY;
+                        const float weightBottomRight = fractionalX * fractionalY;
+                        // Optional weighted scattering for more accuracy.
+                        if (accuracy) {
+                            atomicAdd(&accumulator_d[xi + yi * N], weightCurrent * mass.z);
+                            atomicAdd(&accumulator_d[1 + xi + yi * N], weightRight * mass.z);
+                            atomicAdd(&accumulator_d[xi + (yi + 1) * N], weightBottom * mass.z);
+                            atomicAdd(&accumulator_d[1 + xi + (yi + 1) * N], weightBottomRight * mass.z);
+                        }
+                        else {
+                            atomicAdd(&accumulator_d[xi + yi * N], mass.z);
+                        }
+                    }
+                }
+                // particle 4
+                {
+                    const int xi = xf.w;
+                    const int yi = yf.w;
+                    if (xi >= 1 && xi < N - 1 && yi >= 1 && yi < N - 1) {
+                        const float fractionalX = xf.w - xi;
+                        const float fractionalY = yf.w - yi;
+                        const float xDiff1 = 1.0f - fractionalX;
+                        const float yDiff1 = 1.0f - fractionalY;
+                        const float weightCurrent = xDiff1 * yDiff1;
+                        const float weightRight = fractionalX * yDiff1;
+                        const float weightBottom = xDiff1 * fractionalY;
+                        const float weightBottomRight = fractionalX * fractionalY;
+                        // Optional weighted scattering for more accuracy.
+                        if (accuracy) {
+                            atomicAdd(&accumulator_d[xi + yi * N], weightCurrent * mass.w);
+                            atomicAdd(&accumulator_d[1 + xi + yi * N], weightRight * mass.w);
+                            atomicAdd(&accumulator_d[xi + (yi + 1) * N], weightBottom * mass.w);
+                            atomicAdd(&accumulator_d[1 + xi + (yi + 1) * N], weightBottomRight * mass.w);
+                        }
+                        else {
+                            atomicAdd(&accumulator_d[xi + yi * N], mass.w);
+                        }
                     }
                 }
             }
@@ -1226,7 +1307,7 @@ private:
                         // Copy each device's broadcast data, then sum.
                         gpuErrchk(cudaStreamWaitEvent(broadcastStream[device], latticeBroadcastEvent[device2]));
                         gpuErrchk(cudaMemcpyAsync(accumulator2_d[device][1 - (doubleBufferingCtr % 2)], broadcast_h + (device2 * Constants::N * Constants::N), sizeof(float) * Constants::N * Constants::N, cudaMemcpyHostToDevice, broadcastStream[device]));
-                        Kernels::k_sumAccumulators<Constants::N> << <numBlocks[device], Constants::THREADS, 0, broadcastStream[device] >> > (accumulator_d[device][1 - (doubleBufferingCtr % 2)], accumulator2_d[device][1 - (doubleBufferingCtr % 2)]);
+                        Kernels::k_sumAccumulators<Constants::N><<<numBlocks[device], Constants::THREADS, 0, broadcastStream[device]>>>(accumulator_d[device][1 - (doubleBufferingCtr % 2)], accumulator2_d[device][1 - (doubleBufferingCtr % 2)]);
                     }
                 }
             }
@@ -1235,19 +1316,19 @@ private:
 
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-            Kernels::k_copyAccumulatorIntoLattice<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (accumulator_d[device][doubleBufferingCtr % 2], lattice_d[device]);
+            Kernels::k_copyAccumulatorIntoLattice<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(accumulator_d[device][doubleBufferingCtr % 2], lattice_d[device]);
             if (nbodyCalcCounter == numNbodyStepsPerRender - 1) {
-                Kernels::k_getRealComponentOfLattice<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (lattice_d[device], renderOutput_d[device]);
-                Kernels::k_calcBlurConvolution<Constants::BLUR_R, Constants::N> << <dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::BLUR_R + Kernels::TILE_SIZE)* (Constants::BLUR_R + Kernels::TILE_SIZE), computeStream[device] >> > (renderOutput_d[device], renderOutput2_d[device]);
-                Kernels::k_resetMinMax << <1, 1, 0, computeStream[device] >> > ();
-                Kernels::k_calcMinMax<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (renderOutput2_d[device]);
-                Kernels::k_smoothMinMax << <1, 1, 0, computeStream[device] >> > ();
-                Kernels::k_scaleWithMinMax<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (renderOutput2_d[device], renderOutput_d[device]);
+                Kernels::k_getRealComponentOfLattice<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device], renderOutput_d[device]);
+                Kernels::k_calcBlurConvolution<Constants::BLUR_R, Constants::N><<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::BLUR_R + Kernels::TILE_SIZE)* (Constants::BLUR_R + Kernels::TILE_SIZE), computeStream[device]>>>(renderOutput_d[device], renderOutput2_d[device]);
+                Kernels::k_resetMinMax<<<1, 1, 0, computeStream[device]>>>();
+                Kernels::k_calcMinMax<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(renderOutput2_d[device]);
+                Kernels::k_smoothMinMax<<<1, 1, 0, computeStream[device]>>>();
+                Kernels::k_scaleWithMinMax<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(renderOutput2_d[device], renderOutput_d[device]);
             }
             // Accuracy mode also adds a short-range force component using normal convolution.
             if (accuracy) {
-                Kernels::k_getRealComponentOfLattice<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (lattice_d[device], localForceLattice_d[device]);
-                Kernels::k_calcLocalMassConvolution<Constants::LOCAL_CONV_WIDTH, Constants::N> << <dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE), computeStream[device] >> > (localForceLattice_d[device], localForceLatticeResult_d[device]);
+                Kernels::k_getRealComponentOfLattice<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device], localForceLattice_d[device]);
+                Kernels::k_calcLocalMassConvolution<Constants::LOCAL_CONV_WIDTH, Constants::N><<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE), computeStream[device]>>>(localForceLattice_d[device], localForceLatticeResult_d[device]);
             }
         }
 
@@ -1256,28 +1337,28 @@ private:
     void calcLatticeFft2D() {
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-            Kernels::k_calcFftBatched1D<Constants::N> << <numBlocks[device], Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream[device] >> > (lattice_d[device], false);
-            Kernels::k_calcTranspose<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (lattice_d[device]);
-            Kernels::k_calcTransposeDiagonals<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (lattice_d[device]);
-            Kernels::k_calcFftBatched1D<Constants::N> << <numBlocks[device], Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream[device] >> > (lattice_d[device], false);
-            Kernels::k_calcTranspose<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (lattice_d[device]);
-            Kernels::k_calcTransposeDiagonals<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (lattice_d[device]);
+            Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks[device], Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream[device]>>>(lattice_d[device], false);
+            Kernels::k_calcTranspose<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device]);
+            Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device]);
+            Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks[device], Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream[device]>>>(lattice_d[device], false);
+            Kernels::k_calcTranspose<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device]);
+            Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device]);
         }
 
     }
     void calcFilterFft2D(const int device) {
-        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks[device], Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream[device] >>>(filter_d[device], false);
-        Kernels::k_calcTranspose<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >>>(filter_d[device]);
-        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >>>(filter_d[device]);
-        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks[device], Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream[device] >>>(filter_d[device], false);
-        Kernels::k_calcTranspose<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >>>(filter_d[device]);
-        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >>>(filter_d[device]);
+        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks[device], Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream[device]>>>(filter_d[device], false);
+        Kernels::k_calcTranspose<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(filter_d[device]);
+        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(filter_d[device]);
+        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks[device], Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream[device]>>>(filter_d[device], false);
+        Kernels::k_calcTranspose<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(filter_d[device]);
+        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(filter_d[device]);
 
     }
     void multiplyLatticeFilterElementwise() {
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-            Kernels::k_multElementwiseLatticeFilter<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (lattice_d[device], filter_d[device]);
+            Kernels::k_multElementwiseLatticeFilter<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device], filter_d[device]);
         }
     }
     void calcLatticeIfft2D() {
@@ -1294,9 +1375,9 @@ private:
     void multiSampleForces() {
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-            Kernels::k_shiftLattice<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (lattice_d[device], localForceLatticeResult_d[device], latticeShifted_d[device], accuracy);
-            Kernels::k_calcGradientLattice<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (latticeShifted_d[device], latticeShiftedForceXY_d[device]);
-            Kernels::k_forceMultiSampling<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (latticeShiftedForceXY_d[device], x_d[device][doubleBufferingCtr % 2], y_d[device][doubleBufferingCtr % 2], vx_d[device][doubleBufferingCtr % 2], vy_d[device][doubleBufferingCtr % 2], numParticles[device], accuracy);
+            Kernels::k_shiftLattice<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device], localForceLatticeResult_d[device], latticeShifted_d[device], accuracy);
+            Kernels::k_calcGradientLattice<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(latticeShifted_d[device], latticeShiftedForceXY_d[device]);
+            Kernels::k_forceMultiSampling<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(latticeShiftedForceXY_d[device], x_d[device][doubleBufferingCtr % 2], y_d[device][doubleBufferingCtr % 2], vx_d[device][doubleBufferingCtr % 2], vy_d[device][doubleBufferingCtr % 2], numParticles[device], accuracy);
         }
     }
 

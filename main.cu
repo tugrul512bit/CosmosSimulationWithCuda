@@ -23,7 +23,7 @@ int main() {
     // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0 }; --------------------------------------> Single GPU
     // const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 0 }; -----------------------------------> Single GPU but has extra i/o that is overlapped with compute
     const int deviceIndex[Constants::NUM_CUDA_DEVICES] = { 0, 0 };
-    // Expected relative performance of devices. It's normalized internally so it can be anything like { 0.2f, 3.0f } or { 0.5f, 0.5f }
+    // Expected relative performance of devices. It's normalized internally.
     const float devicePerformance[Constants::NUM_CUDA_DEVICES] = { 0.5f, 0.5f };
     // true = more performance + single force sampling + single mass projection + pure FFT convolution
     // false = multi sampled forces per particle + multi-point mass projection per particle + FFT + local convolution
