@@ -618,10 +618,7 @@ namespace Kernels {
         const int numChunks = numParticles / 4;
         const int steps = (numChunks + numTotalThreads - 1) / numTotalThreads;
 
-#ifndef __CUDA_ARCH__
-#define __CUDA_ARCH__ 600
-#endif
-#if __CUDA_ARCH__ >= 800
+#if defined(__CUDA_ARCH__) &&  __CUDA_ARCH__ >= 800
         __shared__ alignas(16) float4 s_xAsync[Constants::THREADS];
         __shared__ alignas(16) float4 s_yAsync[Constants::THREADS];
         __shared__ alignas(16) float4 s_mAsync[Constants::THREADS];
@@ -639,7 +636,7 @@ namespace Kernels {
                 float4 xf;
                 float4 yf;
                 float4 mass;
-#if __CUDA_ARCH__ >= 800
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
                 __pipeline_wait_prior(0);
                 xf = s_xAsync[thread];
                 yf = s_yAsync[thread];

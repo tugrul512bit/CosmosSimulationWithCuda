@@ -28,7 +28,7 @@ int main() {
     // Multiple time-steps can be computed before each render.
     const int numNbodySimulationsPerRender = 1;
     // 500M particles require 18.5GB memory. Distributed to multiple gpus (in same ratio with devicePerformance[Constants::NUM_CUDA_DEVICES]).
-    const int maximumParticles = 1000 * 1000 * 40;
+    const int maximumParticles = 1000 * 1000 * 50;
     // Indices of CUDA devices to use. When both are same, single device computes all particles. When different devices selected, load-balancing between two devices is made.
     // The algorithm is only scalable to few GPUs for simplicity.
     // Use device index with fastest PCIE connection as the first value here (in case of multi-gpu)
@@ -50,7 +50,7 @@ int main() {
     if (galaxyCollisionScenario) {
         cosmos.clear();
         // Creating two galaxies in a collision course.
-        const int numParticlesPerGalaxy = 1000 * 1000 * 20;
+        const int numParticlesPerGalaxy = 1000 * 1000 * 25;
         const float centerOfGalaxyX = 0.25f;
         const float centerOfGalaxyY = 0.25f;
         const float angularVelocityOfGalaxy = 1.0f;
