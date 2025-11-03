@@ -27,7 +27,7 @@ int main() {
     cv::namedWindow("Fast Nbody");
     // Multiple time-steps can be computed before each render.
     const int numNbodySimulationsPerRender = 1;
-    // 500M particles require 18.5GB memory. Distributed to multiple gpus (in same ratio with devicePerformance[Constants::NUM_CUDA_DEVICES]).
+    // 100M particles require 2.3GB memory. Distributed to multiple gpus (in same ratio with devicePerformance[Constants::NUM_CUDA_DEVICES]).
     const int maximumParticles = 1000 * 1000 * 100;
     // Indices of CUDA devices to use. When both are same, single device computes all particles. When different devices selected, load-balancing between two devices is made.
     // The algorithm is only scalable to few GPUs for simplicity.
