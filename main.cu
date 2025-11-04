@@ -14,7 +14,7 @@ namespace OVERRIDE_CONSTANTS {
     constexpr int N = 2048;
 
     // Time-step of simulation. Lower values increase accuracy.
-    constexpr float dt = 0.002f;
+    constexpr float dt = 50.0f;
     // Force-multiplier for particles.
     constexpr float gravityMultiplier = 1.0f;
 
@@ -29,7 +29,7 @@ int main() {
     // Multiple time-steps can be computed before each render.
     constexpr int NUM_TIME_STEPS_PER_RENDER = 2;
     // 100M particles require 2.3GB memory. Distributed to multiple gpus (in same ratio with devicePerformance[Constants::NUM_CUDA_DEVICES]).
-    const int maximumParticles = 1000 * 1000 * 80;
+    const int maximumParticles = 1000 * 1000 * 150;
     // Indices of CUDA devices to use. When both are same, single device computes all particles. When different devices selected, load-balancing between two devices is made.
     // The algorithm is only scalable to few GPUs for simplicity.
     // Use device index with fastest PCIE connection as the first value here (in case of multi-gpu)
@@ -51,16 +51,16 @@ int main() {
     if (galaxyCollisionScenario) {
         cosmos.clear();
         // Creating two galaxies in a collision course.
-        const int numParticlesPerGalaxy = 1000 * 1000 * 40;
+        const int numParticlesPerGalaxy = 1000 * 1000 * 75;
         const float centerOfGalaxyX = 0.25f;
         const float centerOfGalaxyY = 0.25f;
-        const float angularVelocityOfGalaxy = 0.6f;
+        const float angularVelocityOfGalaxy = 0.005f;
         const float massPerParticle = 1.0f;
         const float radiusOfGalaxy = 0.2f;
-        const float firstGalaxyCenterOfMassVelocityX = 0.01f;
-        const float firstGalaxyCenterOfMassVelocityY = 0.01f;
-        const float secondGalaxyCenterOfMassVelocityX = -0.02f;
-        const float secondGalaxyCenterOfMassVelocityY = -0.02f;
+        const float firstGalaxyCenterOfMassVelocityX = 0.000025f;
+        const float firstGalaxyCenterOfMassVelocityY = 0.000025f;
+        const float secondGalaxyCenterOfMassVelocityX = -0.00005f;
+        const float secondGalaxyCenterOfMassVelocityY = -0.00005f;
         const bool addBlackHoleToCenter = true;
         cosmos.addGalaxy(numParticlesPerGalaxy, centerOfGalaxyX, centerOfGalaxyY, angularVelocityOfGalaxy, massPerParticle, radiusOfGalaxy, firstGalaxyCenterOfMassVelocityX, firstGalaxyCenterOfMassVelocityY, addBlackHoleToCenter);
         cosmos.addGalaxy(numParticlesPerGalaxy, centerOfGalaxyX + 0.50f, centerOfGalaxyY + 0.50f, angularVelocityOfGalaxy, massPerParticle, radiusOfGalaxy, secondGalaxyCenterOfMassVelocityX, secondGalaxyCenterOfMassVelocityY, addBlackHoleToCenter);
@@ -73,6 +73,7 @@ int main() {
     // Asynchronously reading the generated frames.
     int frameCount = 0;
     auto t0 = std::chrono::high_resolution_clock::now();
+    float fps = 0;
     while(true){
         bool ready;
         std::vector<float> frame = cosmos.popFrame(ready);
@@ -88,12 +89,27 @@ int main() {
             cv::resize(mat, resized, cv::Size(w, h), 0, 0, cv::INTER_LANCZOS4);
             resized.convertTo(resizedColored, CV_8UC3, 255.0f);
             cv::applyColorMap(resizedColored, resizedColored, cv::COLORMAP_JET);
+            cv::putText(resizedColored,
+                "Average number of particles per pixel = " + std::to_string(maximumParticles /(float) (w * h)),
+                cv::Point(5, 25),
+                cv::FONT_HERSHEY_COMPLEX_SMALL,
+                1.2,
+                cv::Scalar(0, 0, 255),
+                2,
+                cv::LINE_AA);
+            cv::putText(resizedColored,
+                "Aggregate FPS=" + std::to_string(fps) + " SPS=" + std::to_string(NUM_TIME_STEPS_PER_RENDER * fps),
+                cv::Point(5, 50),
+                cv::FONT_HERSHEY_COMPLEX_SMALL,
+                1.2,
+                cv::Scalar(0, 0, 255),
+                2,
+                cv::LINE_AA);
             cv::imshow("Fast Nbody", resizedColored);
             if (frameCount++ % 100 == 99) {
                 auto t1 = std::chrono::high_resolution_clock::now();
                 auto elapsedSeconds = std::chrono::duration<double>(t1 - t0).count();
-                float fps = frameCount / elapsedSeconds;
-                std::cout << "Aggregate FPS=" << fps<< " SPS="<< (NUM_TIME_STEPS_PER_RENDER * fps) << std::endl;
+                fps = frameCount / elapsedSeconds;
                 t0 = std::chrono::high_resolution_clock::now();
                 frameCount = 0;
             }

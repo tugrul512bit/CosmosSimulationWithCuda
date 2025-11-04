@@ -31,7 +31,7 @@ namespace Constants {
     // Number of threads per CUDA block. This is for 1536 resident threads per SM. For older GPUs, 512 or 1024 can be chosen.
     constexpr int THREADS = 768;
     // Number of CUDA devices (max 2 tested)
-    constexpr int NUM_CUDA_DEVICES = 2;
+    constexpr int NUM_CUDA_DEVICES = 1;
 
     // FFT uses these (long-range force calculation)
     // N is width of lattice (N x N) and can be only a power of 2. Higher value increases accuracy at the cost of performance.
@@ -40,7 +40,7 @@ namespace Constants {
 
 
     // Time-step of simulation. Lower values increase accuracy.
-    constexpr float dt = 0.002f;
+    constexpr float dt = 50.0f;
     // Force-multiplier for particles.
     constexpr float gravityMultiplier = 1.0f;
 
@@ -103,11 +103,17 @@ namespace Kernels {
                 const int j = index / N;
                 const int cx = i <= N / 2 ? 0 : N;
                 const int cy = j <= N / 2 ? 0 : N;
-                const float dx = (i  - cx) * (2048.0f / N);
-                const float dy = (j  - cy) * (2048.0f / N);
-                const float r = sqrtf(dx * dx + dy * dy + 0.1f);
-                data[index].x = 1.0f / r;
-                data[index].y = 0.0f;
+                const float dx = i  - cx;
+                const float dy = j  - cy;
+                const float r = sqrtf(dx * dx + dy * dy);
+                if (r > 0.5f) {
+                    data[index].x = 1.0f / r;
+                    data[index].y = 0.0f;
+                }
+                else {
+                    data[index].x = 3.0f;
+                    data[index].y = 0.0f;
+                }
             }
         }
     }
@@ -213,7 +219,7 @@ namespace Kernels {
                     botBot = __ldca(&lattice_d[index + 2 * N]);
                 }
                 // Gradient
-                const float h = 2048.0f / N;
+                const float h = 1.0f;
                 const float forceComponentX = (-rightRight + 8.0f * right - 8.0f * left + leftLeft) / (h * 12.0f);
                 const float forceComponentY = (-botBot + 8.0f * bot - 8.0f * top + topTop) / (h * 12.0f);
 
@@ -760,7 +766,7 @@ namespace Kernels {
             const int index = ii * numTotalThreads + globalThread;
             if (index < N * N) {
                 const float diff = smoothMax - smoothMin;
-                output_d[index] = powf((input_d[index] - smoothMin) / diff, 0.2f);
+                output_d[index] = 1.8f * powf((input_d[index] - smoothMin) / diff, 0.25f);
             }
         }
     }
@@ -928,7 +934,7 @@ public:
             y[i] = 0.01f * Constants::N + (0.98f * dist(rng) * Constants::N);
             xOld[i] = x[i];
             yOld[i] = y[i];
-            m[i] = 1.0f;
+            m[i] = 1.0f / sum;
         }
 
         // For rendering.
@@ -1039,12 +1045,12 @@ public:
     // Adds a galaxy with n particles, with center at (centerX, centerY) normalized coordinates.
     void addGalaxy(int n, float normalizedCenterX = 0.5f, float normalizedCenterY = 0.5f, float angularVelocity = 1.0f, float massPerParticle = 1.0f, float normalizedRadius = 0.3f, float centerOfMassVelocityX = 0.0f, float centerOfMassVelocityY = 0.0f, bool blackHole = false) {
         const int maxCount = min(particleCounter + n, totalNumParticles);
-        angularVelocity *= Constants::N;
-        angularVelocity /= 1024.0f;
+        angularVelocity /= Constants::dt;
         std::uniform_real_distribution<float> dist(0.0f, 1.0f);
         const float radiusSquared = (Constants::N * normalizedRadius) * (Constants::N * normalizedRadius);
         const float totalMass = massPerParticle * (maxCount - particleCounter) + (blackHole ? (maxCount - particleCounter) * massPerParticle / 1000.0f : 0.0f);
-
+        centerOfMassVelocityX /= Constants::dt;
+        centerOfMassVelocityY /= Constants::dt;
         for (int i = particleCounter; i < maxCount; i++) {
             const float r = (0.1f + 0.9f * dist(rng)) * (Constants::N * normalizedRadius);
             const float a = Constants::MATH_PI * 2.0 * dist(rng);
@@ -1057,7 +1063,7 @@ public:
             // orbit velocity
             xOld[i] = -Constants::dt * ((vecY * angularVelocity) * characteristicSpeedScaling + centerOfMassVelocityX * Constants::N) + x[i];
             yOld[i] = -Constants::dt * ((-vecX * angularVelocity) * characteristicSpeedScaling + centerOfMassVelocityY * Constants::N) + y[i];
-            m[i] = massPerParticle;
+            m[i] = massPerParticle / totalNumParticles;
 
             if (i == maxCount - 1) {
                 if (blackHole) {
@@ -1065,7 +1071,7 @@ public:
                     y[i] = normalizedCenterY * Constants::N;
                     xOld[i] = x[i] - centerOfMassVelocityX * Constants::N * Constants::dt;
                     yOld[i] = y[i] - centerOfMassVelocityY * Constants::N * Constants::dt;
-                    m[i] = (maxCount - particleCounter) * massPerParticle / 1000.0f;
+                    m[i] = ((maxCount - particleCounter) * massPerParticle / 1000.0f) / totalNumParticles;
                 }
             }
         }
