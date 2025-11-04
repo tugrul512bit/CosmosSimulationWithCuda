@@ -14,7 +14,7 @@ namespace OVERRIDE_CONSTANTS {
     constexpr int N = 2048;
 
     // Time-step of simulation. Lower values increase accuracy.
-    constexpr float dt = 0.004f;
+    constexpr float dt = 0.002f;
     // Force-multiplier for particles.
     constexpr float gravityMultiplier = 1.0f;
 
@@ -27,7 +27,7 @@ namespace OVERRIDE_CONSTANTS {
 int main() {
     cv::namedWindow("Fast Nbody");
     // Multiple time-steps can be computed before each render.
-    constexpr int NUM_TIME_STEPS_PER_RENDER = 1;
+    constexpr int NUM_TIME_STEPS_PER_RENDER = 2;
     // 100M particles require 2.3GB memory. Distributed to multiple gpus (in same ratio with devicePerformance[Constants::NUM_CUDA_DEVICES]).
     const int maximumParticles = 1000 * 1000 * 80;
     // Indices of CUDA devices to use. When both are same, single device computes all particles. When different devices selected, load-balancing between two devices is made.
