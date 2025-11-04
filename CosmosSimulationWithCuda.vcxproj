@@ -84,7 +84,11 @@
       <CodeGeneration>
       </CodeGeneration>
       <AdditionalOptions>-gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_120,code=compute_120 %(AdditionalOptions)</AdditionalOptions>
+      <Optimization>O3</Optimization>
     </CudaCompile>
+    <CudaLink>
+      <Optimization>O3</Optimization>
+    </CudaLink>
   </ItemDefinitionGroup>
   <ItemGroup>
     <CudaCompile Include="main.cu" />
