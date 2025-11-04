@@ -14,7 +14,7 @@ namespace OVERRIDE_CONSTANTS {
     constexpr int N = 2048;
 
     // Time-step of simulation. Lower values increase accuracy.
-    constexpr float dt = 0.005f;
+    constexpr float dt = 0.002f;
     // Force-multiplier for particles.
     constexpr float gravityMultiplier = 1.0f;
 
@@ -29,7 +29,7 @@ int main() {
     // Multiple time-steps can be computed before each render.
     constexpr int NUM_TIME_STEPS_PER_RENDER = 1;
     // 100M particles require 2.3GB memory. Distributed to multiple gpus (in same ratio with devicePerformance[Constants::NUM_CUDA_DEVICES]).
-    const int maximumParticles = 1000 * 1000 * 50;
+    const int maximumParticles = 1000 * 1000 * 80;
     // Indices of CUDA devices to use. When both are same, single device computes all particles. When different devices selected, load-balancing between two devices is made.
     // The algorithm is only scalable to few GPUs for simplicity.
     // Use device index with fastest PCIE connection as the first value here (in case of multi-gpu)
@@ -42,7 +42,7 @@ int main() {
     const float devicePerformance[Constants::NUM_CUDA_DEVICES] = { 1.0f };
     // true = more performance + single force sampling + single mass projection + pure FFT convolution
     // false = multi sampled forces per particle + multi-point mass projection per particle + FFT + local convolution
-    const bool lowAccuracy = false;
+    const bool lowAccuracy = true;
     // Window width/height
     const int w = 1340;
     const int h = 1340;
@@ -51,7 +51,7 @@ int main() {
     if (galaxyCollisionScenario) {
         cosmos.clear();
         // Creating two galaxies in a collision course.
-        const int numParticlesPerGalaxy = 1000 * 1000 * 25;
+        const int numParticlesPerGalaxy = 1000 * 1000 * 40;
         const float centerOfGalaxyX = 0.25f;
         const float centerOfGalaxyY = 0.25f;
         const float angularVelocityOfGalaxy = 1.0f;
@@ -74,9 +74,10 @@ int main() {
     int frameCount = 0;
     auto t0 = std::chrono::high_resolution_clock::now();
     while(true){
-        std::vector<float> frame = cosmos.popFrame();
+        bool ready;
+        std::vector<float> frame = cosmos.popFrame(ready);
 
-        if (frame.size() > 0) {
+        if (ready) {
             // Clear render output.
             mat.setTo(cv::Scalar(0.0f));
             // Copy lattice to opencv mat.
@@ -88,11 +89,13 @@ int main() {
             resized.convertTo(resizedColored, CV_8UC3, 255.0f);
             cv::applyColorMap(resizedColored, resizedColored, cv::COLORMAP_JET);
             cv::imshow("Fast Nbody", resizedColored);
-            if (frameCount++ % 100 == 0) {
+            if (frameCount++ % 100 == 99) {
                 auto t1 = std::chrono::high_resolution_clock::now();
-                auto elapsed_sec = std::chrono::duration<double>(t1 - t0).count();
-                auto fps = frameCount / elapsed_sec;
+                auto elapsedSeconds = std::chrono::duration<double>(t1 - t0).count();
+                auto fps = frameCount / elapsedSeconds;
                 std::cout << "Aggregate FPS: " << fps << std::endl;
+                t0 = std::chrono::high_resolution_clock::now();
+                frameCount = 0;
             }
             // ESC = exit
             if (cv::waitKey(1) == 27) {

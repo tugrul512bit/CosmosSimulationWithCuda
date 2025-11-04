@@ -1268,13 +1268,17 @@ private:
         }
     }
     // returns frame pixels.
-    std::vector<float>& popFrame() {
-        static std::vector<float> result(Constants::N * Constants::N + 1);
+    std::vector<float>& popFrame(bool& ready) {
+        static std::vector<float> result(Constants::N * Constants::N);
         {
             std::lock_guard<std::mutex> lg(lock);
             if (popCtr < pushCtr) {
                 result.swap(frames[popCtr % Constants::MAX_FRAMES_BUFFERED]);
                 popCtr++;
+                ready = true;
+            }
+            else {
+                ready = false;
             }
         }
         return result;
