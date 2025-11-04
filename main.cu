@@ -14,7 +14,7 @@ namespace OVERRIDE_CONSTANTS {
     constexpr int N = 2048;
 
     // Time-step of simulation. Lower values increase accuracy.
-    constexpr float dt = 0.002f;
+    constexpr float dt = 0.004f;
     // Force-multiplier for particles.
     constexpr float gravityMultiplier = 1.0f;
 
@@ -54,7 +54,7 @@ int main() {
         const int numParticlesPerGalaxy = 1000 * 1000 * 40;
         const float centerOfGalaxyX = 0.25f;
         const float centerOfGalaxyY = 0.25f;
-        const float angularVelocityOfGalaxy = 1.0f;
+        const float angularVelocityOfGalaxy = 0.6f;
         const float massPerParticle = 1.0f;
         const float radiusOfGalaxy = 0.2f;
         const float firstGalaxyCenterOfMassVelocityX = 0.01f;
@@ -92,8 +92,8 @@ int main() {
             if (frameCount++ % 100 == 99) {
                 auto t1 = std::chrono::high_resolution_clock::now();
                 auto elapsedSeconds = std::chrono::duration<double>(t1 - t0).count();
-                auto fps = frameCount / elapsedSeconds;
-                std::cout << "Aggregate FPS: " << fps << std::endl;
+                float fps = frameCount / elapsedSeconds;
+                std::cout << "Aggregate FPS=" << fps<< " SPS="<< (NUM_TIME_STEPS_PER_RENDER * fps) << std::endl;
                 t0 = std::chrono::high_resolution_clock::now();
                 frameCount = 0;
             }

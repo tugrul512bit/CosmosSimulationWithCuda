@@ -103,11 +103,10 @@ namespace Kernels {
                 const int j = index / N;
                 const int cx = i <= N / 2 ? 0 : N;
                 const int cy = j <= N / 2 ? 0 : N;
-                const float dx = i  - cx;
-                const float dy = j  - cy;
+                const float dx = (i  - cx) * (2048.0f / N);
+                const float dy = (j  - cy) * (2048.0f / N);
                 const float r = sqrtf(dx * dx + dy * dy + 0.1f);
-                float mult = (N / 2048.0f) * (N / 2048.0f);
-                data[index].x = mult / r;
+                data[index].x = 1.0f / r;
                 data[index].y = 0.0f;
             }
         }
@@ -214,7 +213,7 @@ namespace Kernels {
                     botBot = __ldca(&lattice_d[index + 2 * N]);
                 }
                 // Gradient
-                const float h = 1024.0f / N;
+                const float h = 2048.0f / N;
                 const float forceComponentX = (-rightRight + 8.0f * right - 8.0f * left + leftLeft) / (h * 12.0f);
                 const float forceComponentY = (-botBot + 8.0f * bot - 8.0f * top + topTop) / (h * 12.0f);
 
