@@ -37,8 +37,7 @@ namespace Constants {
     // N is width of lattice (N x N) and can be only a power of 2. Higher value increases accuracy at the cost of performance.
     constexpr int N = 2048;
     constexpr double MATH_PI = 3.14159265358979323846;
-    // Local convolution (short-range force calculation) to increase accuracy for high-accuracy mode. Only computes closest masses within LOCAL_CONV_WIDTH / 2 range.
-    constexpr int LOCAL_CONV_WIDTH = 33;
+
 
     // Time-step of simulation. Lower values increase accuracy.
     constexpr float dt = 0.002f;
@@ -61,8 +60,6 @@ namespace Constants {
     // N is width of lattice (N x N) and can be only a power of 2. Higher value increases accuracy at the cost of performance.
     constexpr int N = OVERRIDE_CONSTANTS::N;
     constexpr double MATH_PI = 3.14159265358979323846;
-    // Local convolution (short-range force calculation) to increase accuracy for high-accuracy mode. Only computes closest masses within LOCAL_CONV_WIDTH / 2 range.
-    constexpr int LOCAL_CONV_WIDTH = 33;
 
     // Time-step of simulation. Lower values increase accuracy.
     constexpr float dt = OVERRIDE_CONSTANTS::dt;
@@ -110,11 +107,6 @@ namespace Kernels {
                 const float dy = j  - cy;
                 const float r = sqrtf(dx * dx + dy * dy + 0.1f);
                 float mult = (N / 2048.0f) * (N / 2048.0f);
-                const int x = index % N;
-                const int y = index / N;
-                const int sX = (x + (N / 2)) % N;
-                const int sY = (y + (N / 2)) % N;
-                const int s = sX + sY * N;
                 data[index].x = mult / r;
                 data[index].y = 0.0f;
             }
@@ -850,8 +842,6 @@ private:
     cufftHandle fftPlan[Constants::NUM_CUDA_DEVICES];
     cudaStream_t computeStream[Constants::NUM_CUDA_DEVICES];
     cudaEvent_t latticeBroadcastEvent[Constants::NUM_CUDA_DEVICES];
-    cudaEvent_t eventStart[Constants::NUM_CUDA_DEVICES];
-    cudaEvent_t eventStop[Constants::NUM_CUDA_DEVICES];
     ComplexVar* lattice_d[Constants::NUM_CUDA_DEVICES];
     // 2: copies for double-buffering
     float* accumulator_d[Constants::NUM_CUDA_DEVICES];
@@ -882,7 +872,6 @@ private:
     int pushCtr;
     int popCtr;
     bool working;
-
 
 public:
     Universe(int particles, const int(&cudaDevices)[Constants::NUM_CUDA_DEVICES], const float(&devicePerformances)[Constants::NUM_CUDA_DEVICES], bool lowAccuracy) {
@@ -933,7 +922,7 @@ public:
         yOld.resize(particles);
         m.resize(particles);
         gpuErrchk(cudaMallocHost(&broadcast_h, sizeof(float) * Constants::N * Constants::N * Constants::NUM_CUDA_DEVICES));
-        gpuErrchk(cudaMallocHost(&frame_h, sizeof(float) * (Constants::N * Constants::N + 1)));
+        gpuErrchk(cudaMallocHost(&frame_h, sizeof(float) * (Constants::N * Constants::N)));
         std::uniform_real_distribution<float> dist(0.0f, 1.0f);
         for (int i = 0; i < particles; i++) {
             x[i] = 0.01f * Constants::N + (0.98f * dist(rng) * Constants::N);
@@ -972,10 +961,7 @@ public:
 
             
             gpuErrchk(cudaMemcpyToSymbolAsync(Kernels::renderBlurKern_c, renderFilter.data(), sizeof(float) * Constants::BLUR_R * Constants::BLUR_R, 0, cudaMemcpyHostToDevice, computeStream[device]));
-
-            gpuErrchk(cudaEventCreate(&eventStart[device]));
-            gpuErrchk(cudaEventCreate(&eventStop[device]));
-            gpuErrchk(cudaEventCreate(&latticeBroadcastEvent[device]));
+            gpuErrchk(cudaEventCreateWithFlags(&latticeBroadcastEvent[device], cudaEventDisableTiming));
 
             gpuErrchk(cudaMallocAsync(&lattice_d[device], sizeof(ComplexVar) * Constants::N * Constants::N, computeStream[device]));
             gpuErrchk(cudaMallocAsync(&localForceLattice_d[device], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
@@ -1223,7 +1209,7 @@ private:
     void pushFrame(float* frame) {
         std::lock_guard<std::mutex> lg(lock);
         if (pushCtr < popCtr + Constants::MAX_FRAMES_BUFFERED - 1) {
-            memcpy(frames[pushCtr % Constants::MAX_FRAMES_BUFFERED].data(), frame, sizeof(float) * (Constants::N * Constants::N + 1));
+            memcpy(frames[pushCtr % Constants::MAX_FRAMES_BUFFERED].data(), frame, sizeof(float) * (Constants::N * Constants::N));
             pushCtr++;
         }
     }
@@ -1231,7 +1217,7 @@ private:
         std::lock_guard<std::mutex> lg(lock);
         workingTmp = working;
     }
-public:
+    public:
     constexpr int getLatticeSize() {
         return Constants::N;
     }
@@ -1243,8 +1229,7 @@ public:
             popCtr = 0;
             frames.resize(Constants::MAX_FRAMES_BUFFERED);
             for (int i = 0; i < Constants::MAX_FRAMES_BUFFERED; i++) {
-                // +1 for elapsed milliseconds data.
-                frames[i].resize(Constants::N * Constants::N + 1);
+                frames[i].resize(Constants::N * Constants::N);
             }
             working = true;
         }
@@ -1256,9 +1241,6 @@ public:
                 gpuErrchk(cudaSetDevice(cudaDeviceIndices[gpu]));
                 cufftSetStream(fftPlan[gpu], computeStream[gpu]);
                 while (workingTmp) {
-                    if (nbodyCalcCounter == 0) {
-                        gpuErrchk(cudaEventRecord(eventStart[gpu], computeStream[gpu]));
-                    }
                     scatterMassOnLattice(gpu, nbodyCalcCounter);
                     calcLatticeFft2D(gpu);
                     multiplyLatticeFilterElementwise(gpu);
@@ -1268,21 +1250,12 @@ public:
                     nbodyCalcCounter++;
                     if (nbodyCalcCounter == NUM_TIME_STEPS_PER_RENDER) {
                         nbodyCalcCounter = 0;
-                        float milliseconds = 0.0f;
-
-                        gpuErrchk(cudaEventRecord(eventStop[gpu], computeStream[gpu]));
                         gpuErrchk(cudaStreamSynchronize(computeStream[gpu]));
-                        float ms;
-                        gpuErrchk(cudaEventElapsedTime(&ms, eventStart[gpu], eventStop[gpu]));
-                        // Selecting longest completion time as total work time.
-                        if (ms > milliseconds) {
-                            milliseconds = ms;
-                        }
+                        
                         if (gpu == 0) {
                             gpuErrchk(cudaSetDevice(cudaDeviceIndices[0]));
                             gpuErrchk(cudaMemcpyAsync(frame_h, renderOutput_d[0], sizeof(float) * Constants::N * Constants::N, cudaMemcpyDeviceToHost, computeStream[0]));
                             gpuErrchk(cudaStreamSynchronize(computeStream[0]));
-                            frame_h[Constants::N * Constants::N] = milliseconds / NUM_TIME_STEPS_PER_RENDER;
                             pushFrame(frame_h);
                         }
                     }
@@ -1294,7 +1267,7 @@ public:
             }));
         }
     }
-    // returns frame pixels + last element as elapsed milliseconds per time-step.
+    // returns frame pixels.
     std::vector<float>& popFrame() {
         static std::vector<float> result(Constants::N * Constants::N + 1);
         {
@@ -1337,8 +1310,6 @@ public:
             gpuErrchk(cudaFreeAsync(m_d[device], computeStream[device]));
             gpuErrchk(cudaFreeAsync(renderOutput_d[device], computeStream[device]));
             gpuErrchk(cudaFreeAsync(renderOutput2_d[device], computeStream[device]));
-            gpuErrchk(cudaEventDestroy(eventStart[device]));
-            gpuErrchk(cudaEventDestroy(eventStop[device]));
             gpuErrchk(cudaEventDestroy(latticeBroadcastEvent[device]));
         }
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
