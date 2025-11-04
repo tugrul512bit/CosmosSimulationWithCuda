@@ -26,7 +26,7 @@ namespace OVERRIDE_CONSTANTS {
 int main() {
     cv::namedWindow("Fast Nbody");
     // Multiple time-steps can be computed before each render.
-    const int numNbodySimulationsPerRender = 1;
+    constexpr int NUM_TIME_STEPS_PER_RENDER = 1;
     // 100M particles require 2.3GB memory. Distributed to multiple gpus (in same ratio with devicePerformance[Constants::NUM_CUDA_DEVICES]).
     const int maximumParticles = 1000 * 1000 * 100;
     // Indices of CUDA devices to use. When both are same, single device computes all particles. When different devices selected, load-balancing between two devices is made.
@@ -45,7 +45,7 @@ int main() {
     // Window width/height
     const int w = 1340;
     const int h = 1340;
-    Universe cosmos(maximumParticles, deviceIndex, devicePerformance, lowAccuracy, numNbodySimulationsPerRender);
+    Universe<NUM_TIME_STEPS_PER_RENDER> cosmos(maximumParticles, deviceIndex, devicePerformance, lowAccuracy);
     const bool galaxyCollisionScenario = true;
     if (galaxyCollisionScenario) {
         cosmos.clear();

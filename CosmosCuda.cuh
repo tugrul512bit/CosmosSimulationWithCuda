@@ -13,6 +13,9 @@
 #include <mutex>
 #include <cuda_runtime.h>
 #include <cuda_pipeline.h>
+#pragma comment(lib, "cufft.lib")
+#include <cufft.h>
+#include <cufftXt.h>
 #define gpuErrchk(ans) { gpuAssert((ans), __FILE__, __LINE__); }
 inline void gpuAssert(cudaError_t code, const char* file, int line, bool abort = true)
 {
@@ -73,12 +76,7 @@ namespace Constants {
 }
 #endif
 namespace Kernels {
-    constexpr int SUB_MATRIX_SIZE = 32;
-    constexpr int NUM_SUB_MATRICES_PER_DIMENSION = Constants::N / SUB_MATRIX_SIZE;
-    constexpr int PAIR_LIST_SIZE = (NUM_SUB_MATRICES_PER_DIMENSION * (NUM_SUB_MATRICES_PER_DIMENSION - 1)) / 2;
-    __constant__ float shortRangeGravKern_c[Constants::LOCAL_CONV_WIDTH * Constants::LOCAL_CONV_WIDTH];
     __constant__ float renderBlurKern_c[Constants::BLUR_R * Constants::BLUR_R];
-    __device__ int2 pairIndexList_d[PAIR_LIST_SIZE];
     __device__ float minVar;
     __device__ float maxVar;
     __device__ float smoothMin;
@@ -90,260 +88,7 @@ namespace Kernels {
         result.y = y;
         return result;
     }
-    __device__ __forceinline__ ComplexVar d_wForNk(const double N, const double k) {
-        const double angle = (-2.0 * Constants::MATH_PI * k) / N;
-        return makeComplexVar(cos(angle), -sin(angle));
-    }
-    template<int N>
-    __global__ void k_fillCoefficientArray() {
-        const int thread = threadIdx.x;
-        const int threads = blockDim.x;
-        int offset = 0;
-        for (int i = 1; i < N; i *= 2) {
-            const int steps = (i * 2 + threads - 1) / threads;
-            for (int j = 0; j < steps; j++) {
-                const int id = j * threads + thread;
-                if (id < i * 2) {
-                    wCoefficients[offset + id] = d_wForNk(i * 2, id);
-                }
 
-            }
-            offset += i * 2;
-        }
-    }
-
-    __device__ __forceinline__ void d_calcWarpDft(ComplexVar& var, const int warpLane, const float inverseMult, ComplexVar* wCoefficients) {
-        int ofs = 0;
-        #pragma unroll 1
-        for (int level = 1; level <= 16; level <<= 1)
-        {
-            const int level2 = level * 2;
-            const int idx = (warpLane % level2);
-            const bool firstHalf = idx < level;
-            const ComplexVar gather = makeComplexVar(__shfl_xor_sync(0xFFFFFFFF, var.x, level), __shfl_xor_sync(0xFFFFFFFF, var.y, level));
-            const ComplexVar select1 = firstHalf ? var : gather;
-            const ComplexVar select2 = firstHalf ? gather : var;
-            ComplexVar tmp = __ldg(&wCoefficients[ofs + idx]);
-            tmp.y *= inverseMult;
-            float tmpX = fmaf(select2.x, tmp.x, select1.x);
-            var.x = fmaf(-select2.y, tmp.y, tmpX);
-            float tmpY = fmaf(select2.x, tmp.y, select1.y);
-            var.y = fmaf(select2.y, tmp.x, tmpY);
-            ofs += level * 2;
-        }
-    }
-
-
-    template<int N>
-    __device__ constexpr unsigned int d_bits() {
-        int t = 1;
-        int ctr = 0;
-        while (t < N) {
-            t *= 2;
-            ctr++;
-        }
-        return ctr;
-    }
-    // This is used for 2D
-    template<int N>
-    __global__ void k_calcFftBatched1D(ComplexVar* data, const bool inverse = false) {
-        const unsigned int thread = threadIdx.x;
-        const unsigned int warpLane = thread & 31;
-        const unsigned int block = blockIdx.x;
-        const unsigned int numBlocks = gridDim.x;
-        const unsigned int gridSteps = (N + numBlocks - 1) / numBlocks;
-        constexpr unsigned int blockSteps = (N + Constants::THREADS - 1) / Constants::THREADS;
-        const float inverseMult = inverse ? -1.0f : 1.0f;
-        const float divider = inverse ? N : 1.0f;
-        ComplexVar vars[blockSteps];
-        extern __shared__ ComplexVar s_coalescing[];
-        for (unsigned int grid = 0; grid < gridSteps; grid++) {
-            const unsigned int row = grid * numBlocks + block;
-            if (row < N) {
-                #pragma unroll
-                for (int blc = 0; blc < blockSteps; blc++) {
-                    const unsigned int col = blc * Constants::THREADS + thread;
-                    const int element = col + row * N;
-                    if (col < N) {
-                        s_coalescing[col] = __ldg(&data[element]);
-                    }
-                }
-                __syncthreads();
-                #pragma unroll
-                for (int blc = 0; blc < blockSteps; blc++) {
-                    const unsigned int col = blc * Constants::THREADS + thread;
-                    if (col < N) {
-                        vars[blc] = s_coalescing[__brev(col) >> (32 - d_bits<Constants::N>())];
-                    }
-                    d_calcWarpDft(vars[blc], warpLane, inverseMult, wCoefficients);
-                }
-                __syncthreads();
-                #pragma unroll
-                for (int blc = 0; blc < blockSteps; blc++) {
-                    const unsigned int col = blc * Constants::THREADS + thread;
-                    if (col < N) {
-                        s_coalescing[col] = vars[blc];
-                    }
-                }
-                __syncthreads();
-                int wOfs = 62;
-                #pragma unroll 1
-                for (unsigned int level = 32; level < N; level <<= 1) {
-                    const int level2 = level * 2;
-                    #pragma unroll
-                    for (int blc = 0; blc < blockSteps; blc++) {
-                        const unsigned int col = blc * Constants::THREADS + thread;
-                        if (col < N) {
-                            const int idx = (col % level2);
-                            const bool firstHalf = idx < level;
-                            const ComplexVar gather = s_coalescing[col ^ level];
-                            const ComplexVar select1 = firstHalf ? vars[blc] : gather;
-                            const ComplexVar select2 = firstHalf ? gather : vars[blc];
-                            ComplexVar tmp = __ldg(&wCoefficients[wOfs + idx]);
-                            tmp.y *= inverseMult;
-                            float tmpX = fmaf(select2.x, tmp.x, select1.x);
-                            vars[blc].x = fmaf(-select2.y, tmp.y, tmpX);
-                            float tmpY = fmaf(select2.x, tmp.y, select1.y);
-                            vars[blc].y = fmaf(select2.y, tmp.x, tmpY);
-                        }
-                    }
-                    wOfs += level * 2;
-                    __syncthreads();
-                    #pragma unroll
-                    for (int blc = 0; blc < blockSteps; blc++) {
-                        const unsigned int col = blc * Constants::THREADS + thread;
-                        if (col < N) {
-                            s_coalescing[col] = vars[blc];
-                        }
-                    }
-                    __syncthreads();
-                }
-                #pragma unroll
-                for (int blc = 0; blc < blockSteps; blc++) {
-                    const unsigned int col = blc * Constants::THREADS + thread;
-                    const int element = col + row * N;
-                    if (col < N) {
-                        vars[blc].x /= divider;
-                        vars[blc].y /= divider;
-                        data[element] = vars[blc];
-                    }
-                }
-
-            }
-        }
-    }
-    // Computes pair indices to be used in transpose operations without requiring double-precision calculation at expense of memory fetch.
-    template<int N>
-    __global__ void k_fillPairIndexList() {
-        const int thread = threadIdx.x;
-        const int block = blockIdx.x;
-        const int numBlocks = gridDim.x;
-        const int numThreads = blockDim.x;
-        const int globalThread = thread + block * numThreads;
-        const int numTotalThreads = numThreads * numBlocks;
-        const int steps = (PAIR_LIST_SIZE + numTotalThreads - 1) / numTotalThreads;
-        for (int ii = 0; ii < steps; ii++) {
-            const long long index = ii * numTotalThreads + globalThread;
-            if (index < PAIR_LIST_SIZE) {
-                const long long i = NUM_SUB_MATRICES_PER_DIMENSION - 2.0 - floor(sqrt(4.0 * PAIR_LIST_SIZE * 2ll - 8.0 * index - 7.0) * 0.5 - 0.5);
-                const long long j = index + i + 1ll - PAIR_LIST_SIZE + (((NUM_SUB_MATRICES_PER_DIMENSION - i) * (NUM_SUB_MATRICES_PER_DIMENSION - 1ll - i)) >> 1ll);
-                pairIndexList_d[index] = make_int2(i, j);
-            }
-        }
-
-    }
-
-    template<int N>
-    __global__ void k_calcTranspose(ComplexVar* data) {
-        const int thread = threadIdx.x;
-        const int block = blockIdx.x;
-        const int numBlocks = gridDim.x;
-        const int numThreads = blockDim.x;
-        const int steps = (PAIR_LIST_SIZE + numBlocks - 1) / numBlocks;
-        __shared__ ComplexVar s_tile[SUB_MATRIX_SIZE][SUB_MATRIX_SIZE + 1];
-        __shared__ ComplexVar s_tile2[SUB_MATRIX_SIZE][SUB_MATRIX_SIZE + 1];
-        for (int ii = 0; ii < steps; ii++) {
-            const int index = ii * numBlocks + block;
-            if (index < PAIR_LIST_SIZE) {
-                const int2 pair = pairIndexList_d[index];
-                const int i = pair.x;
-                const int j = pair.y;
-                if (i < j) {
-                    const int tileX = i * SUB_MATRIX_SIZE;
-                    const int tileY = j * SUB_MATRIX_SIZE;
-                    const int tileOffset = tileX + tileY * N;
-                    const int tileOffset2 = tileY + tileX * N;
-                    constexpr int SUB_ELEMENTS = SUB_MATRIX_SIZE * SUB_MATRIX_SIZE;
-                    const int steps2 = (SUB_ELEMENTS + numThreads - 1) / numThreads;
-                    #pragma unroll
-                    for (int k = 0; k < steps2; k++) {
-                        const int element = k * numThreads + thread;
-                        if (element < SUB_ELEMENTS) {
-                            const int col = element % SUB_MATRIX_SIZE;
-                            const int row = element / SUB_MATRIX_SIZE;
-                            s_tile[row][col] = data[tileOffset + col + row * N];
-                            s_tile2[row][col] = data[tileOffset2 + col + row * N];
-                        }
-                    }
-                    __syncthreads();
-                    #pragma unroll
-                    for (int k = 0; k < steps2; k++) {
-                        const int element = k * numThreads + thread;
-                        if (element < SUB_ELEMENTS) {
-                            const int col = element % SUB_MATRIX_SIZE;
-                            const int row = element / SUB_MATRIX_SIZE;
-                            data[tileOffset2 + col + row * N] = s_tile[col][row];
-                            data[tileOffset + col + row * N] = s_tile2[col][row];
-                        }
-                    }
-                    __syncthreads();
-                }
-            }
-        }
-    }
-    template<int N>
-    __global__ void k_calcTransposeDiagonals(ComplexVar* data) {
-        const int thread = threadIdx.x;
-        const int block = blockIdx.x;
-        const int numBlocks = gridDim.x;
-        const int numThreads = blockDim.x;
-
-        const int steps = (NUM_SUB_MATRICES_PER_DIMENSION + numBlocks - 1) / numBlocks;
-        __shared__ ComplexVar s_tile[SUB_MATRIX_SIZE][SUB_MATRIX_SIZE + 1];
-        for (int ii = 0; ii < steps; ii++) {
-            const int index = ii * numBlocks + block;
-            if (index < NUM_SUB_MATRICES_PER_DIMENSION) {
-                // if i == j, transpose in-place. if i < j, swap
-                const int i = index;
-                const int j = index;
-                const int tileX = i * SUB_MATRIX_SIZE;
-                const int tileY = j * SUB_MATRIX_SIZE;
-                const int tileOffset = tileX + tileY * N;
-                constexpr int SUB_ELEMENTS = SUB_MATRIX_SIZE * SUB_MATRIX_SIZE;
-                const int steps2 = (SUB_ELEMENTS + numThreads - 1) / numThreads;
-                #pragma unroll
-                for (int k = 0; k < steps2; k++) {
-                    const int element = k * numThreads + thread;
-                    if (element < SUB_ELEMENTS) {
-                        const int col = element % SUB_MATRIX_SIZE;
-                        const int row = element / SUB_MATRIX_SIZE;
-                        s_tile[row][col] = data[tileOffset + col + row * N];
-                    }
-                }
-                __syncthreads();
-                #pragma unroll
-                for (int k = 0; k < steps2; k++) {
-                    const int element = k * numThreads + thread;
-                    if (element < SUB_ELEMENTS) {
-                        const int col = element % SUB_MATRIX_SIZE;
-                        const int row = element / SUB_MATRIX_SIZE;
-                        data[tileOffset + col + row * N] = s_tile[col][row];
-                    }
-                }
-                __syncthreads();
-            }
-        }
-    }
     template<int N>
     __global__ void k_generateFilterLattice(ComplexVar* data, bool accuracy) {
         const int thread = threadIdx.x;
@@ -353,32 +98,54 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
-        //constexpr float cutoff = 2.0f;
-        // when accuracy mode enabled, a second lattice is computed only for closest neighbors (within 16 lattice cells radius) using direct convolution.
-        constexpr float selfForceAvoidance = 2.0f;
-        constexpr float shortRangeForceRange = (Constants::LOCAL_CONV_WIDTH - 1) / 2.0f;
-        const float cutoff = accuracy ? shortRangeForceRange : selfForceAvoidance;
         #pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < N * N) {
                 const int i = index % N;
                 const int j = index / N;
-                const int cx = N / 2;
-                const int cy = N / 2;
-                const float dx = i - cx;
-                const float dy = j - cy;
-                const float r = sqrtf(dx * dx + dy * dy);
+                const int cx = i <= N / 2 ? 0 : N;
+                const int cy = j <= N / 2 ? 0 : N;
+                const float dx = i  - cx;
+                const float dy = j  - cy;
+                const float r = sqrtf(dx * dx + dy * dy + 0.1f);
                 float mult = (N / 2048.0f) * (N / 2048.0f);
-                
-                if (r > cutoff) {
-                    data[((i + N / 2) % N) + ((j + N / 2) % N) * N].x = mult / r;
-                    data[((i + N / 2) % N) + ((j + N / 2) % N) * N].y = 0.0f;
-                }
-                else {
-                    data[((i + N / 2) % N) + ((j + N / 2) % N) * N].x = 0.0f;
-                    data[((i + N / 2) % N) + ((j + N / 2) % N) * N].y = 0.0f;
-                }
+                const int x = index % N;
+                const int y = index / N;
+                const int sX = (x + (N / 2)) % N;
+                const int sY = (y + (N / 2)) % N;
+                const int s = sX + sY * N;
+                data[index].x = mult / r;
+                data[index].y = 0.0f;
+            }
+        }
+    }
+    template<int N>
+    __global__ void k_divElementwiseLatticeFilter(ComplexVar* data, ComplexVar* data2) {
+        const int thread = threadIdx.x;
+        const int block = blockIdx.x;
+        const int numBlocks = gridDim.x;
+        const int numThreads = blockDim.x;
+        const int globalThread = thread + block * numThreads;
+        const int numTotalThreads = numThreads * numBlocks;
+        const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
+
+#pragma unroll
+        for (int ii = 0; ii < steps; ii++) {
+            const int index = ii * numTotalThreads + globalThread;
+            if (index < N * N) {
+                const int i = index % N;
+                const int j = index / N;
+                auto d1 = data[i + j * N];
+                const auto d2 = data2[i + j * N];
+
+                float denom = d2.x * d2.x + d2.y * d2.y + 0.001f;
+                const float tmpX = (d1.x * d2.x + d1.y * d2.y) / denom;
+                const float tmpY = (d1.y * d2.x - d1.x * d2.y) / denom;
+
+                d1.x = tmpX;
+                d1.y = tmpY;
+                data[i + j * N] = d1;
             }
         }
     }
@@ -391,7 +158,7 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
-        #pragma unroll
+#pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < N * N) {
@@ -415,7 +182,7 @@ namespace Kernels {
         const int numThreads = blockDim.x;
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
-        const int steps = (N*N + numTotalThreads - 1) / numTotalThreads;
+        const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < N * N) {
@@ -449,16 +216,16 @@ namespace Kernels {
                     rightRight = __ldca(&lattice_d[index + 2]);
                 }
                 if (centerY - 2 >= 0) {
-                    topTop = __ldca(&lattice_d[index - 2*N]);
+                    topTop = __ldca(&lattice_d[index - 2 * N]);
                 }
                 if (centerY + 2 < N) {
-                    botBot = __ldca(&lattice_d[index + 2*N]);
+                    botBot = __ldca(&lattice_d[index + 2 * N]);
                 }
                 // Gradient
                 const float h = 1024.0f / N;
                 const float forceComponentX = (-rightRight + 8.0f * right - 8.0f * left + leftLeft) / (h * 12.0f);
                 const float forceComponentY = (-botBot + 8.0f * bot - 8.0f * top + topTop) / (h * 12.0f);
-                
+
                 latticeForceXY_d[index] = make_float2(forceComponentX * Constants::gravityMultiplier, forceComponentY * Constants::gravityMultiplier);
             }
         }
@@ -485,7 +252,7 @@ namespace Kernels {
                 float posY[4] = { posYr.x,posYr.y,posYr.z,posYr.w };
                 float oldDataX[4] = { vecOldX.x, vecOldX.y, vecOldX.z, vecOldX.w };
                 float oldDataY[4] = { vecOldY.x, vecOldY.y, vecOldY.z, vecOldY.w };
-                #pragma unroll 4
+#pragma unroll 4
                 for (int m = 0; m < 4; m++) {
                     const int centerX = int(posX[m]);
                     const int centerY = int(posY[m]);
@@ -518,7 +285,7 @@ namespace Kernels {
                             xComponent = forceComponentsCurrent.x;
                             yComponent = forceComponentsCurrent.y;
                         }
-                     
+
                         float newX = fmaf(2.0f, posX[m], -oldDataX[m]) + Constants::dt * xComponent * Constants::dt;
                         float newY = fmaf(2.0f, posY[m], -oldDataY[m]) + Constants::dt * yComponent * Constants::dt;
                         if (newX < 2.0f) {
@@ -557,7 +324,7 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
-        #pragma unroll
+#pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < N * N) {
@@ -568,7 +335,7 @@ namespace Kernels {
 
     // Optionally shifts and adds local values to global.
     template<int N>
-    __global__ void k_shiftLattice(ComplexVar* lattice_d, float* latticeLocal_d, float* latticeShifted_d, bool accuracy) {
+    __global__ void k_shiftLattice(ComplexVar* lattice_d, float* latticeShifted_d, bool accuracy) {
         const int thread = threadIdx.x;
         const int block = blockIdx.x;
         const int numBlocks = gridDim.x;
@@ -576,16 +343,16 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
-        #pragma unroll
+#pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
+            const int x = index % N;
+            const int y = index / N;
+            const int sX = (x + (N / 2)) % N;
+            const int sY = (y + (N / 2)) % N;
+            const int s = sX + sY * N;
             if (index < N * N) {
-                if (accuracy) {
-                    latticeShifted_d[index] = lattice_d[index].x + latticeLocal_d[index];
-                }
-                else {
-                    latticeShifted_d[index] = lattice_d[index].x;
-                }
+                latticeShifted_d[s] = lattice_d[index].x / (Constants::N * Constants::N);
             }
         }
     }
@@ -599,7 +366,7 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
-        #pragma unroll
+#pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < N * N) {
@@ -607,7 +374,78 @@ namespace Kernels {
             }
         }
     }
+    template<int N>
+    __global__ void k_generateMassAssignmentKernel(ComplexVar* data, bool accuracy) {
+        const int thread = threadIdx.x;
+        const int block = blockIdx.x;
+        const int numThreads = blockDim.x;
+        const int globalThread = thread + block * numThreads;
+        const int numTotalThreads = gridDim.x * numThreads;
+        const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
 
+        #pragma unroll
+        for (int ii = 0; ii < steps; ii++) {
+            const int index = globalThread + ii * numTotalThreads;
+            if (index < N * N) {
+                const int i = index % N;
+                const int j = index / N;
+
+                const int cx = N / 2;
+                const int cy = N / 2;
+                const int dx = i - cx;
+                const int dy = j - cy;
+
+                if (!accuracy) {
+
+                    data[index].x = (dx == 0 && dy == 0) ? 1.0f : 0.0f;
+                    data[index].y = 0.0f;
+                }
+                else {
+                    float fx = 0.5f;
+                    float fy = 0.5f;
+                    float w = 0.0f;
+                    if ((dx == 0 || dx == 1) && (dy == 0 || dy == 1)) {
+                        float wx = (dx == 0) ? (1.0f - fx) : fx;
+                        float wy = (dy == 0) ? (1.0f - fy) : fy;
+                        w = wx * wy;
+                    }
+
+                    data[index].x = w;
+                    data[index].y = 0.0f;
+                }
+            }
+        }
+    }
+    template<int N>
+    __global__ void k_applyPhaseShift(ComplexVar* data, float fx, float fy) {
+        const int thread = threadIdx.x;
+        const int block = blockIdx.x;
+        const int numThreads = blockDim.x;
+        const int numBlocks = gridDim.x;
+        const int globalThread = thread + block * numThreads;
+        const int totalThreads = numThreads * numBlocks;
+        const int steps = (N * N + totalThreads - 1) / totalThreads;
+
+#pragma unroll
+        for (int ii = 0; ii < steps; ii++) {
+            const int idx = ii * totalThreads + globalThread;
+            if (idx < N * N) {
+                const int i = idx % N;
+                const int j = idx / N;
+                const int kx = (i <= N / 2) ? i : i - N;
+                const int ky = (j <= N / 2) ? j : j - N;
+
+                const float phase = -2.0f * Constants::MATH_PI * (kx * fx / N + ky * fy / N);
+
+                const ComplexVar c = data[idx];
+                const float cosA = cosf(phase);
+                const float sinA = sinf(phase);
+
+                data[idx].x = c.x * cosA - c.y * sinA;
+                data[idx].y = c.x * sinA + c.y * cosA;
+            }
+        }
+    }
     template<int N>
     __global__ void k_scatterMassOnAccumulator(float* const __restrict__ accumulator_d, const float4* const __restrict__ x, const float4* const __restrict__ y, const float4* const __restrict__ m, const int numParticles, bool accuracy) {
         const int thread = threadIdx.x;
@@ -630,7 +468,7 @@ namespace Kernels {
             __pipeline_commit();
         }
 #endif
-        
+
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < numChunks) {
@@ -767,7 +605,7 @@ namespace Kernels {
         const int globalThread = thread + block * numThreads;
         const int numTotalThreads = numThreads * numBlocks;
         const int steps = (N * N + numTotalThreads - 1) / numTotalThreads;
-        #pragma unroll
+#pragma unroll
         for (int ii = 0; ii < steps; ii++) {
             const int index = ii * numTotalThreads + globalThread;
             if (index < N * N) {
@@ -935,63 +773,7 @@ namespace Kernels {
             }
         }
     }
-    // This is to capture short-range details missed by FFT.
     constexpr int TILE_SIZE = 32;
-    template<int K, int N>
-    __global__ void k_calcLocalMassConvolution(const float* const __restrict__ latticeIn_d, float* const __restrict__ latticeOut_d) {
-        const int threadX = threadIdx.x;
-        const int threadY = threadIdx.y;
-        const int blockX = blockIdx.x;
-        const int blockY = blockIdx.y;
-        const int numThreadsX = blockDim.x;
-        const int numThreadsY = blockDim.y;
-        const int numBlocksX = gridDim.x;
-        const int numBlocksY = gridDim.y;
-        const int numTilesPerX = N / TILE_SIZE;
-        const int numTilesPerY = N / TILE_SIZE;
-        constexpr int tileElements = (TILE_SIZE + K) * (TILE_SIZE + K);
-        const int tileLoadSteps = (tileElements + numThreadsX * numThreadsY - 1) / (numThreadsX * numThreadsY);
-        constexpr int halfK = (K - 1) / 2;
-        extern __shared__ float s_cache[];
-        for (int tileY = 0; tileY < numTilesPerY / numBlocksY; tileY++) {
-            for (int tileX = 0; tileX < numTilesPerX / numBlocksX; tileX++) {
-                const int tileXX = tileX * numBlocksX + blockX;
-                const int tileYY = tileY * numBlocksY + blockY;
-                const int tileOffset = tileXX * TILE_SIZE + tileYY * TILE_SIZE * N;
-                #pragma unroll
-                for (int load = 0; load < tileLoadSteps; load++) {
-                    const int loadT = load * numThreadsX * numThreadsY + threadX + threadY * numThreadsX;
-                    const int loadedX = loadT % (TILE_SIZE + K);
-                    const int loadedY = loadT / (TILE_SIZE + K);
-
-                    const int loaded = loadedX + loadedY * (TILE_SIZE + K);
-                    if (loadedY < (TILE_SIZE + K) && loadedX < (TILE_SIZE + K)) {
-                        if (loadedX + tileXX * TILE_SIZE - halfK >= 0 && loadedX + tileXX * TILE_SIZE - halfK < N &&
-                            loadedY + tileYY * TILE_SIZE - halfK >= 0 && loadedY + tileYY * TILE_SIZE - halfK < N) {
-                            s_cache[loaded] = __ldg(&latticeIn_d[tileOffset + loadedX - halfK + (loadedY - halfK) * N]);
-                        }
-                        else {
-                            s_cache[loaded] = 0.0f;
-                        }
-                    }
-
-                }
-                __syncthreads();
-                float acc[2] = { 0.0f, 0.0f };
-                #pragma unroll K
-                for (int iy = -halfK; iy <= halfK; iy++) {
-                    #pragma unroll K
-                    for (int ix = -halfK; ix <= halfK; ix++) {
-                        const int neighborX = ix + threadX + halfK;
-                        const int neighborY = iy + threadY + halfK;
-                        acc[(ix + halfK)&1] = fmaf(s_cache[neighborX + neighborY * (TILE_SIZE + K)], shortRangeGravKern_c[ix + halfK + (iy + halfK) * K], acc[(ix + halfK) & 1]);
-                    }
-                }
-                __syncthreads();
-                latticeOut_d[tileOffset + threadX + threadY * N] = acc[0] + acc[1];
-            }
-        }
-    }
     template<int K, int N>
     __global__ void k_calcBlurConvolution(const float* const __restrict__ latticeIn_d, float* const __restrict__ latticeOut_d) {
         const int threadX = threadIdx.x;
@@ -1013,7 +795,7 @@ namespace Kernels {
                 const int tileXX = tileX * numBlocksX + blockX;
                 const int tileYY = tileY * numBlocksY + blockY;
                 const int tileOffset = tileXX * TILE_SIZE + tileYY * TILE_SIZE * N;
-                #pragma unroll
+#pragma unroll
                 for (int load = 0; load < tileLoadSteps; load++) {
                     const int loadT = load * numThreadsX * numThreadsY + threadX + threadY * numThreadsX;
                     const int loadedX = loadT % (TILE_SIZE + K);
@@ -1033,9 +815,9 @@ namespace Kernels {
                 }
                 __syncthreads();
                 float acc[2] = { 0.0f, 0.0f };
-                #pragma unroll K
+#pragma unroll K
                 for (int iy = -halfK; iy <= halfK; iy++) {
-                    #pragma unroll K
+#pragma unroll K
                     for (int ix = -halfK; ix <= halfK; ix++) {
                         const int neighborX = ix + threadX + halfK;
                         const int neighborY = iy + threadY + halfK;
@@ -1048,7 +830,7 @@ namespace Kernels {
         }
     }
 }
-
+template<int NUM_TIME_STEPS_PER_RENDER>
 struct Universe {
 private:
     // For host
@@ -1059,16 +841,14 @@ private:
     float* broadcast_h;
     float* frame_h;
     int particleCounter;
-    int nbodyCalcCounter;
-    int numNbodyStepsPerRender;
     int numParticles[Constants::NUM_CUDA_DEVICES];
     int particleOffsets[Constants::NUM_CUDA_DEVICES];
     int totalNumParticles;
     std::mt19937 rng;
 
     // For device
+    cufftHandle fftPlan[Constants::NUM_CUDA_DEVICES];
     cudaStream_t computeStream[Constants::NUM_CUDA_DEVICES];
-    cudaStream_t broadcastStream[Constants::NUM_CUDA_DEVICES];
     cudaEvent_t latticeBroadcastEvent[Constants::NUM_CUDA_DEVICES];
     cudaEvent_t eventStart[Constants::NUM_CUDA_DEVICES];
     cudaEvent_t eventStop[Constants::NUM_CUDA_DEVICES];
@@ -1079,6 +859,7 @@ private:
     float* latticeShifted_d[Constants::NUM_CUDA_DEVICES];
     float2* latticeShiftedForceXY_d[Constants::NUM_CUDA_DEVICES];
     ComplexVar* filter_d[Constants::NUM_CUDA_DEVICES];
+    ComplexVar* deconvFilter_d[Constants::NUM_CUDA_DEVICES];
     float* x_d[Constants::NUM_CUDA_DEVICES];
     float* y_d[Constants::NUM_CUDA_DEVICES];
     float* xOld_d[Constants::NUM_CUDA_DEVICES];
@@ -1097,14 +878,14 @@ private:
     // For frame queue
     std::mutex lock;
     std::vector<std::vector<float>> frames;
-    std::thread computeThread;
+    std::vector<std::thread> dedicatedThreads;
     int pushCtr;
     int popCtr;
     bool working;
 
 
 public:
-    Universe(int particles, const int (&cudaDevices)[Constants::NUM_CUDA_DEVICES], const float(&devicePerformances)[Constants::NUM_CUDA_DEVICES], bool lowAccuracy, int numStepsPerRender) {
+    Universe(int particles, const int(&cudaDevices)[Constants::NUM_CUDA_DEVICES], const float(&devicePerformances)[Constants::NUM_CUDA_DEVICES], bool lowAccuracy) {
         float totalPerf = 0.0f;
         float perf[Constants::NUM_CUDA_DEVICES];
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
@@ -1115,7 +896,6 @@ public:
         }
         accuracy = !lowAccuracy;
         particleCounter = 0;
-        nbodyCalcCounter = 0;
         srand(time(0));
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             numParticles[device] = particles * perf[device];
@@ -1130,7 +910,7 @@ public:
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             total += numParticles[device];
         }
-        int selector = 0;
+
         while (total > particles) {
             numParticles[Constants::NUM_CUDA_DEVICES - 1]--;
             total--;
@@ -1139,14 +919,14 @@ public:
             numParticles[Constants::NUM_CUDA_DEVICES - 1]++;
             total++;
         }
-        
+
         totalNumParticles = total;
         int sum = 0;
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             particleOffsets[device] = sum;
             sum += numParticles[device];
         }
-        
+
         x.resize(particles);
         xOld.resize(particles);
         y.resize(particles);
@@ -1154,31 +934,15 @@ public:
         m.resize(particles);
         gpuErrchk(cudaMallocHost(&broadcast_h, sizeof(float) * Constants::N * Constants::N * Constants::NUM_CUDA_DEVICES));
         gpuErrchk(cudaMallocHost(&frame_h, sizeof(float) * (Constants::N * Constants::N + 1)));
-        
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
         for (int i = 0; i < particles; i++) {
-            x[i] = (rand() % Constants::N);
-            y[i] = (rand() % Constants::N);
+            x[i] = 0.01f * Constants::N + (0.98f * dist(rng) * Constants::N);
+            y[i] = 0.01f * Constants::N + (0.98f * dist(rng) * Constants::N);
             xOld[i] = x[i];
             yOld[i] = y[i];
             m[i] = 1.0f;
         }
-        // For local convolution in force calculation.
-        constexpr int HALF_WIDTH = (Constants::LOCAL_CONV_WIDTH - 1) / 2;
-        std::vector<float> localForceFilter(Constants::LOCAL_CONV_WIDTH * Constants::LOCAL_CONV_WIDTH);
-        for (int iy = -HALF_WIDTH; iy <= HALF_WIDTH; iy++) {
-            for (int ix = -HALF_WIDTH; ix <= HALF_WIDTH; ix++) {
-                const int index = ix + HALF_WIDTH + (iy + HALF_WIDTH) * Constants::LOCAL_CONV_WIDTH;
-                const double r = sqrt((double)(ix * ix + iy * iy));
-                float mult = (Constants::N / 2048.0f) * (Constants::N / 2048.0f);
-                constexpr float selfAvoidanceRangeForAccuracy = 2.0f;
-                if (r > selfAvoidanceRangeForAccuracy && r < HALF_WIDTH) {
-                    localForceFilter[index] = mult / r;
-                }
-                else {
-                    localForceFilter[index] = 0.0f;
-                }
-            }
-        }
+
         // For rendering.
         std::vector<float> renderFilter(Constants::BLUR_R * Constants::BLUR_R);
         for (int iy = -Constants::BLUR_HALF_R; iy <= Constants::BLUR_HALF_R; iy++) {
@@ -1194,33 +958,33 @@ public:
             }
         }
         particleCounter = particles;
-        numNbodyStepsPerRender = numStepsPerRender;
         rng = std::mt19937(static_cast<unsigned int>(std::time(0)));
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             cudaDeviceIndices[device] = cudaDevices[device];
 
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
             gpuErrchk(cudaStreamCreate(&computeStream[device]));
-            gpuErrchk(cudaStreamCreate(&broadcastStream[device]));
 
             cudaDeviceProp prop;
             gpuErrchk(cudaGetDeviceProperties(&prop, cudaDeviceIndices[device]));
             int blocksPerSM = (prop.maxThreadsPerMultiProcessor + Constants::THREADS - 1) / Constants::THREADS;
             numBlocks[device] = prop.multiProcessorCount * blocksPerSM;
 
-            gpuErrchk(cudaMemcpyToSymbolAsync(Kernels::shortRangeGravKern_c, localForceFilter.data(), sizeof(float) * Constants::LOCAL_CONV_WIDTH * Constants::LOCAL_CONV_WIDTH, 0, cudaMemcpyHostToDevice, computeStream[device]));
-            gpuErrchk(cudaMemcpyToSymbolAsync(Kernels::renderBlurKern_c, renderFilter.data(), sizeof(float) * Constants::BLUR_R * Constants::BLUR_R, 0, cudaMemcpyHostToDevice, computeStream[device]));
             
+            gpuErrchk(cudaMemcpyToSymbolAsync(Kernels::renderBlurKern_c, renderFilter.data(), sizeof(float) * Constants::BLUR_R * Constants::BLUR_R, 0, cudaMemcpyHostToDevice, computeStream[device]));
+
             gpuErrchk(cudaEventCreate(&eventStart[device]));
             gpuErrchk(cudaEventCreate(&eventStop[device]));
             gpuErrchk(cudaEventCreate(&latticeBroadcastEvent[device]));
-            
+
             gpuErrchk(cudaMallocAsync(&lattice_d[device], sizeof(ComplexVar) * Constants::N * Constants::N, computeStream[device]));
             gpuErrchk(cudaMallocAsync(&localForceLattice_d[device], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
             gpuErrchk(cudaMallocAsync(&localForceLatticeResult_d[device], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
             gpuErrchk(cudaMallocAsync(&latticeShifted_d[device], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
             gpuErrchk(cudaMallocAsync(&latticeShiftedForceXY_d[device], sizeof(float2) * Constants::N * Constants::N, computeStream[device]));
             gpuErrchk(cudaMallocAsync(&filter_d[device], sizeof(ComplexVar) * Constants::N * Constants::N, computeStream[device]));
+            gpuErrchk(cudaMallocAsync(&deconvFilter_d[device], sizeof(ComplexVar)* Constants::N* Constants::N, computeStream[device]));
+            
             gpuErrchk(cudaMallocAsync(&x_d[device], sizeof(float) * numParticles[device], computeStream[device]));
             gpuErrchk(cudaMallocAsync(&y_d[device], sizeof(float) * numParticles[device], computeStream[device]));
             gpuErrchk(cudaMallocAsync(&xOld_d[device], sizeof(float) * numParticles[device], computeStream[device]));
@@ -1228,31 +992,36 @@ public:
             gpuErrchk(cudaMallocAsync(&m_d[device], sizeof(float) * numParticles[device], computeStream[device]));
 
             gpuErrchk(cudaMallocAsync(&accumulator_d[device], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
-            gpuErrchk(cudaMallocAsync(&accumulator2_d[device], sizeof(float)* Constants::N * Constants::N, computeStream[device]));
+            gpuErrchk(cudaMallocAsync(&accumulator2_d[device], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
 
-            gpuErrchk(cudaMemsetAsync(accumulator_d[device], 0, sizeof(float)* Constants::N* Constants::N, computeStream[device]));
+            gpuErrchk(cudaMemsetAsync(accumulator_d[device], 0, sizeof(float) * Constants::N * Constants::N, computeStream[device]));
             gpuErrchk(cudaMemsetAsync(accumulator2_d[device], 0, sizeof(float) * Constants::N * Constants::N, computeStream[device]));
 
-            gpuErrchk(cudaMemsetAsync(lattice_d[device], 0, sizeof(ComplexVar)* Constants::N* Constants::N, computeStream[device]));
-            gpuErrchk(cudaMemsetAsync(localForceLattice_d[device], 0, sizeof(float)* Constants::N* Constants::N, computeStream[device]));
-            gpuErrchk(cudaMemsetAsync(localForceLatticeResult_d[device], 0, sizeof(float)* Constants::N* Constants::N, computeStream[device]));
-            gpuErrchk(cudaMemsetAsync(latticeShifted_d[device], 0, sizeof(float)* Constants::N* Constants::N, computeStream[device]));
+            gpuErrchk(cudaMemsetAsync(lattice_d[device], 0, sizeof(ComplexVar) * Constants::N * Constants::N, computeStream[device]));
+            gpuErrchk(cudaMemsetAsync(localForceLattice_d[device], 0, sizeof(float) * Constants::N * Constants::N, computeStream[device]));
+            gpuErrchk(cudaMemsetAsync(localForceLatticeResult_d[device], 0, sizeof(float) * Constants::N * Constants::N, computeStream[device]));
+            gpuErrchk(cudaMemsetAsync(latticeShifted_d[device], 0, sizeof(float) * Constants::N * Constants::N, computeStream[device]));
             gpuErrchk(cudaMemsetAsync(latticeShiftedForceXY_d[device], 0, sizeof(float2) * Constants::N * Constants::N, computeStream[device]));
 
             gpuErrchk(cudaMallocAsync(&renderOutput_d[device], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
             gpuErrchk(cudaMallocAsync(&renderOutput2_d[device], sizeof(float) * Constants::N * Constants::N, computeStream[device]));
             gpuErrchk(cudaMemcpyAsync(x_d[device], x.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
             gpuErrchk(cudaMemcpyAsync(y_d[device], y.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
-            gpuErrchk(cudaMemcpyAsync(xOld_d[device], x.data() + (particleOffsets[device]), sizeof(float)* numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
+            gpuErrchk(cudaMemcpyAsync(xOld_d[device], x.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
             gpuErrchk(cudaMemcpyAsync(yOld_d[device], y.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
             gpuErrchk(cudaMemcpyAsync(m_d[device], m.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
-            cudaFuncSetAttribute(Kernels::k_calcFftBatched1D<Constants::N>, cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxShared);
-            cudaFuncSetAttribute(Kernels::k_calcFftBatched1D<Constants::N>, cudaFuncAttributeMaxDynamicSharedMemorySize, Constants::N * sizeof(ComplexVar));
-            Kernels::k_fillCoefficientArray<Constants::N><<<1, 1024, 0, computeStream[device] >>>();
-            Kernels::k_fillPairIndexList<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>();
-            Kernels::k_generateFilterLattice<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(filter_d[device], accuracy);
-            Kernels::k_initSmoothMinMax<<<1, 1, 0, computeStream[device]>>>();
+
+            Kernels::k_generateFilterLattice<Constants::N> << <numBlocks[device], Constants::THREADS, 0, computeStream[device] >> > (filter_d[device], accuracy);
+            Kernels::k_initSmoothMinMax << <1, 1, 0, computeStream[device] >> > ();
+            Kernels::k_generateMassAssignmentKernel<Constants::N><<<numBlocks[device], Constants::THREADS>>>(deconvFilter_d[device], accuracy);
+
+            cufftPlan2d(&fftPlan[device], Constants::N, Constants::N, CUFFT_C2C);
+            cufftSetStream(fftPlan[device], computeStream[device]);
             calcFilterFft2D(device);
+            calcFilter2Fft2D(device);
+            if (accuracy) {
+                Kernels::k_applyPhaseShift<Constants::N> << <numBlocks[device], Constants::THREADS >> > (deconvFilter_d[device], -0.5f, -0.5f);
+            }
         }
 
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
@@ -1290,7 +1059,7 @@ public:
         std::uniform_real_distribution<float> dist(0.0f, 1.0f);
         const float radiusSquared = (Constants::N * normalizedRadius) * (Constants::N * normalizedRadius);
         const float totalMass = massPerParticle * (maxCount - particleCounter) + (blackHole ? (maxCount - particleCounter) * massPerParticle / 1000.0f : 0.0f);
-        
+
         for (int i = particleCounter; i < maxCount; i++) {
             const float r = (0.1f + 0.9f * dist(rng)) * (Constants::N * normalizedRadius);
             const float a = Constants::MATH_PI * 2.0 * dist(rng);
@@ -1301,8 +1070,8 @@ public:
             const float vecX = x[i] - normalizedCenterX * Constants::N;
             const float vecY = y[i] - normalizedCenterY * Constants::N;
             // orbit velocity
-            xOld[i] = -Constants::dt * ((vecY * angularVelocity) * characteristicSpeedScaling  + centerOfMassVelocityX * Constants::N) + x[i];
-            yOld[i] = -Constants::dt * ((-vecX * angularVelocity)* characteristicSpeedScaling + centerOfMassVelocityY * Constants::N) + y[i];
+            xOld[i] = -Constants::dt * ((vecY * angularVelocity) * characteristicSpeedScaling + centerOfMassVelocityX * Constants::N) + x[i];
+            yOld[i] = -Constants::dt * ((-vecX * angularVelocity) * characteristicSpeedScaling + centerOfMassVelocityY * Constants::N) + y[i];
             m[i] = massPerParticle;
 
             if (i == maxCount - 1) {
@@ -1330,139 +1099,139 @@ public:
         }
     }
 private:
-    void scatterMassOnLattice() {
-        
-        for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-            gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-            gpuErrchk(cudaStreamSynchronize(computeStream[device]));
-            gpuErrchk(cudaStreamSynchronize(broadcastStream[device]));
-        }
-        for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-            gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-            if (Constants::NUM_CUDA_DEVICES > 1) {
-                // Device - device broadcast send
-                Kernels::k_clearAccumulator<Constants::N> <<<numBlocks[device], Constants::THREADS, 0, broadcastStream[device] >>> (accumulator_d[device]);
-                Kernels::k_scatterMassOnAccumulator<Constants::N> <<<numBlocks[device], Constants::THREADS, 0, broadcastStream[device] >>> (accumulator_d[device], reinterpret_cast<float4*>(x_d[device]), reinterpret_cast<float4*>(y_d[device]), reinterpret_cast<float4*>(m_d[device]), numParticles[device], accuracy);
-                gpuErrchk(cudaMemcpyAsync(broadcast_h + (device * Constants::N * Constants::N),
-                    accumulator_d[device],
-                    sizeof(float) * Constants::N * Constants::N,
-                    cudaMemcpyDeviceToHost, broadcastStream[device]));
-                gpuErrchk(cudaEventRecord(latticeBroadcastEvent[device], broadcastStream[device]));
-            }
-            else {
-                Kernels::k_clearAccumulator<Constants::N> <<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >>> (accumulator_d[device]);
-                Kernels::k_scatterMassOnAccumulator<Constants::N> <<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >>> (accumulator_d[device], reinterpret_cast<float4*>(x_d[device]), reinterpret_cast<float4*>(y_d[device]), reinterpret_cast<float4*>(m_d[device]), numParticles[device], accuracy);
-            }
-        }
+    struct Barrier { 
+        Barrier() { 
+            std::unique_lock<std::mutex> lock(lockMutex); 
+            count = 0; 
+            waitCount = 0; 
+        } 
+        void wait(bool stopAll = false) { 
+            std::unique_lock<std::mutex> lock(lockMutex); 
+            if (stopAll) { 
+                waitCount++;
+                cv.notify_all(); 
+                return; 
+            } 
+            unsigned int currentCounter = count; 
+            waitCount++; 
+            if (Constants::NUM_CUDA_DEVICES == waitCount) { 
+                waitCount = 0; 
+                count++; 
+                cv.notify_all(); 
+            } else { 
+                cv.wait(lock, [this, currentCounter] { return currentCounter != count; }); 
+            } 
+        } 
+        private: 
+        std::mutex lockMutex; 
+        std::condition_variable cv; 
+        int count; 
+        int waitCount; 
+    };
+    Barrier timeStepBarriers[NUM_TIME_STEPS_PER_RENDER];
 
-        // Device - device broadcast receive
-        if (Constants::NUM_CUDA_DEVICES > 1) {
-            for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-                gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
+    void scatterMassOnLattice(int gpu, int nbodyCalcCounter) {
 
-                for (int device2 = 0; device2 < Constants::NUM_CUDA_DEVICES; device2++) {
-                    if (device != device2) {
-                        // Copy each device's broadcast data, then sum.
-                        gpuErrchk(cudaStreamWaitEvent(computeStream[device], latticeBroadcastEvent[device2]));
-                        gpuErrchk(cudaMemcpyAsync(  accumulator2_d[device],
-                                                    broadcast_h + (device2 * Constants::N * Constants::N), 
-                                                    sizeof(float) * Constants::N * Constants::N, 
-                                                    cudaMemcpyHostToDevice, computeStream[device]));
-                        Kernels::k_sumAccumulators<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >>>(
-                            accumulator_d[device],
-                            accumulator2_d[device]);
-                    }
+        if (Constants::NUM_CUDA_DEVICES > 1) {;
+            // Device - device broadcast: send
+            Kernels::k_clearAccumulator<Constants::N> << <numBlocks[gpu], Constants::THREADS, 0, computeStream[gpu] >> > (accumulator_d[gpu]);
+            Kernels::k_scatterMassOnAccumulator<Constants::N> << <numBlocks[gpu], Constants::THREADS, 0, computeStream[gpu] >> > (accumulator_d[gpu], reinterpret_cast<float4*>(x_d[gpu]), reinterpret_cast<float4*>(y_d[gpu]), reinterpret_cast<float4*>(m_d[gpu]), numParticles[gpu], accuracy);
+            gpuErrchk(cudaMemcpyAsync(broadcast_h + (gpu * Constants::N * Constants::N),
+                accumulator_d[gpu],
+                sizeof(float) * Constants::N * Constants::N,
+                cudaMemcpyDeviceToHost, computeStream[gpu]));
+            gpuErrchk(cudaEventRecord(latticeBroadcastEvent[gpu], computeStream[gpu]));
+            timeStepBarriers[nbodyCalcCounter].wait();
+            // broadcast: receive
+            for (int device2 = 0; device2 < Constants::NUM_CUDA_DEVICES; device2++) {
+                if (gpu != device2) {
+                    // Copy each device's broadcast data, then sum.
+                    gpuErrchk(cudaStreamWaitEvent(computeStream[gpu], latticeBroadcastEvent[device2]));
+                    gpuErrchk(cudaMemcpyAsync(accumulator2_d[gpu],
+                        broadcast_h + (device2 * Constants::N * Constants::N),
+                        sizeof(float) * Constants::N * Constants::N,
+                        cudaMemcpyHostToDevice, computeStream[gpu]));
+                    Kernels::k_sumAccumulators<Constants::N> << <numBlocks[gpu], Constants::THREADS, 0, computeStream[gpu] >> > (
+                        accumulator_d[gpu],
+                        accumulator2_d[gpu]);
                 }
             }
-        }
-        // Device - device broadcast stop
-        for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-            gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-            Kernels::k_copyAccumulatorIntoLattice<Constants::N> <<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >>> (
-                accumulator_d[device],
-                lattice_d[device]
-                );
-            if (nbodyCalcCounter == numNbodyStepsPerRender - 1) {
-                Kernels::k_getRealComponentOfLattice<Constants::N> <<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >>> (lattice_d[device], renderOutput_d[device]);
-                Kernels::k_calcBlurConvolution<Constants::BLUR_R, Constants::N> <<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::BLUR_R + Kernels::TILE_SIZE)* (Constants::BLUR_R + Kernels::TILE_SIZE), computeStream[device] >>> (renderOutput_d[device], renderOutput2_d[device]);
-                Kernels::k_resetMinMax <<<1, 1, 0, computeStream[device] >>> ();
-                Kernels::k_calcMinMax<Constants::N> <<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >>> (renderOutput2_d[device]);
-                Kernels::k_smoothMinMax <<<1, 1, 0, computeStream[device] >>> ();
-                Kernels::k_scaleWithMinMax<Constants::N> <<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >>> (renderOutput2_d[device], renderOutput_d[device]);
-            }
-            // Accuracy mode also adds a short-range force component using normal convolution.
-            if (accuracy) {
-
-                Kernels::k_getRealComponentOfLattice<Constants::N> <<<numBlocks[device], Constants::THREADS, 0, computeStream[device] >>> (
-                    lattice_d[device],
-                    localForceLattice_d[device]
-                    );
-                Kernels::k_calcLocalMassConvolution<Constants::LOCAL_CONV_WIDTH, Constants::N> <<<dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE)* (Constants::LOCAL_CONV_WIDTH + Kernels::TILE_SIZE), computeStream[device] >>> (
-                    localForceLattice_d[device],
-                    localForceLatticeResult_d[device]
-                    );
-            }
-        }
-        
-        
-    }
-    void calcLatticeFft2D() {
-        for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-            gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-            Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks[device], Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream[device]>>>(lattice_d[device], false);
-            Kernels::k_calcTranspose<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device]);
-            Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device]);
-            Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks[device], Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream[device]>>>(lattice_d[device], false);
-            Kernels::k_calcTranspose<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device]);
-            Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device]);
-        }
-
-    }
-    void calcFilterFft2D(const int device) {
-        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks[device], Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream[device]>>>(filter_d[device], false);
-        Kernels::k_calcTranspose<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(filter_d[device]);
-        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(filter_d[device]);
-        Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks[device], Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream[device]>>>(filter_d[device], false);
-        Kernels::k_calcTranspose<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(filter_d[device]);
-        Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(filter_d[device]);
-
-    }
-    void multiplyLatticeFilterElementwise() {
-        for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-            gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-            Kernels::k_multElementwiseLatticeFilter<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device], filter_d[device]);
-        }
-    }
-    void calcLatticeIfft2D() {
-        for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-            gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-            Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks[device], Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream[device]>>>(lattice_d[device], true);
-            Kernels::k_calcTranspose<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device]);
-            Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device]);
-            Kernels::k_calcFftBatched1D<Constants::N><<<numBlocks[device], Constants::THREADS, Constants::N * sizeof(ComplexVar), computeStream[device]>>>(lattice_d[device], true);
-            Kernels::k_calcTranspose<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device]);
-            Kernels::k_calcTransposeDiagonals<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device]);
-        }
-    }
-    void multiSampleForces() {
-        for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-            gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
             
-            Kernels::k_shiftLattice<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(lattice_d[device], localForceLatticeResult_d[device], latticeShifted_d[device], accuracy);
-            Kernels::k_calcGradientLattice<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(latticeShifted_d[device], latticeShiftedForceXY_d[device]);
-            Kernels::k_forceMultiSampling<Constants::N><<<numBlocks[device], Constants::THREADS, 0, computeStream[device]>>>(latticeShiftedForceXY_d[device], x_d[device], y_d[device], xOld_d[device], yOld_d[device], numParticles[device], accuracy);
+        }
+        else {
+            Kernels::k_clearAccumulator<Constants::N> << <numBlocks[gpu], Constants::THREADS, 0, computeStream[gpu] >> > (accumulator_d[gpu]);
+            Kernels::k_scatterMassOnAccumulator<Constants::N> << <numBlocks[gpu], Constants::THREADS, 0, computeStream[gpu] >> > (accumulator_d[gpu], reinterpret_cast<float4*>(x_d[gpu]), reinterpret_cast<float4*>(y_d[gpu]), reinterpret_cast<float4*>(m_d[gpu]), numParticles[gpu], accuracy);
+        }
+        
+        Kernels::k_copyAccumulatorIntoLattice<Constants::N> << <numBlocks[gpu], Constants::THREADS, 0, computeStream[gpu] >> > (
+            accumulator_d[gpu],
+            lattice_d[gpu]
+            );
+        if (nbodyCalcCounter == NUM_TIME_STEPS_PER_RENDER - 1) {
+            Kernels::k_getRealComponentOfLattice<Constants::N> << <numBlocks[gpu], Constants::THREADS, 0, computeStream[gpu] >> > (lattice_d[gpu], renderOutput_d[gpu]);
+            Kernels::k_calcBlurConvolution<Constants::BLUR_R, Constants::N> << <dim3(32, 32, 1), dim3(32, 32, 1), sizeof(float)* (Constants::BLUR_R + Kernels::TILE_SIZE)* (Constants::BLUR_R + Kernels::TILE_SIZE), computeStream[gpu] >> > (renderOutput_d[gpu], renderOutput2_d[gpu]);
+            Kernels::k_resetMinMax << <1, 1, 0, computeStream[gpu] >> > ();
+            Kernels::k_calcMinMax<Constants::N> << <numBlocks[gpu], Constants::THREADS, 0, computeStream[gpu] >> > (renderOutput2_d[gpu]);
+            Kernels::k_smoothMinMax << <1, 1, 0, computeStream[gpu] >> > ();
+            Kernels::k_scaleWithMinMax<Constants::N> << <numBlocks[gpu], Constants::THREADS, 0, computeStream[gpu] >> > (renderOutput2_d[gpu], renderOutput_d[gpu]);
+        }
+        // Accuracy mode also adds a short-range force component using normal convolution.
+        if (accuracy) {
+            Kernels::k_getRealComponentOfLattice<Constants::N> << <numBlocks[gpu], Constants::THREADS, 0, computeStream[gpu] >> > (
+                lattice_d[gpu],
+                localForceLattice_d[gpu]
+                );
         }
     }
+    void calcLatticeFft2D(int gpu) {
+        cufftExecC2C(fftPlan[gpu],
+            reinterpret_cast<cufftComplex*>(lattice_d[gpu]),
+            reinterpret_cast<cufftComplex*>(lattice_d[gpu]),
+            CUFFT_FORWARD);
+    }
+    void calcFilterFft2D(int gpu) {
+        cufftSetStream(fftPlan[gpu], computeStream[gpu]);
+        cufftExecC2C(fftPlan[gpu],
+            reinterpret_cast<cufftComplex*>(filter_d[gpu]),
+            reinterpret_cast<cufftComplex*>(filter_d[gpu]),
+            CUFFT_FORWARD);
+    }
+    void calcFilter2Fft2D(int gpu) {
+        cufftSetStream(fftPlan[gpu], computeStream[gpu]);
+        cufftExecC2C(fftPlan[gpu],
+            reinterpret_cast<cufftComplex*>(deconvFilter_d[gpu]),
+            reinterpret_cast<cufftComplex*>(deconvFilter_d[gpu]),
+            CUFFT_FORWARD);
+    }
+    void multiplyLatticeFilterElementwise(int gpu) {
+        Kernels::k_multElementwiseLatticeFilter<Constants::N> << <numBlocks[gpu], Constants::THREADS, 0, computeStream[gpu] >> > (lattice_d[gpu], filter_d[gpu]);
+        Kernels::k_divElementwiseLatticeFilter<Constants::N> << <numBlocks[gpu], Constants::THREADS, 0, computeStream[gpu] >> > (lattice_d[gpu], deconvFilter_d[gpu]);
+    }
+    void calcLatticeIfft2D(int gpu) {
+        cufftSetStream(fftPlan[gpu], computeStream[gpu]);
+        cufftExecC2C(fftPlan[gpu],
+            reinterpret_cast<cufftComplex*>(lattice_d[gpu]),
+            reinterpret_cast<cufftComplex*>(lattice_d[gpu]),
+            CUFFT_INVERSE);
+    }
+    void multiSampleForces(int gpu) {
+        Kernels::k_shiftLattice<Constants::N> << <numBlocks[gpu], Constants::THREADS, 0, computeStream[gpu] >> > (lattice_d[gpu], latticeShifted_d[gpu], accuracy);
+        Kernels::k_calcGradientLattice<Constants::N> << <numBlocks[gpu], Constants::THREADS, 0, computeStream[gpu] >> > (latticeShifted_d[gpu], latticeShiftedForceXY_d[gpu]);
+        Kernels::k_forceMultiSampling<Constants::N> << <numBlocks[gpu], Constants::THREADS, 0, computeStream[gpu] >> > (latticeShiftedForceXY_d[gpu], x_d[gpu], y_d[gpu], xOld_d[gpu], yOld_d[gpu], numParticles[gpu], accuracy);
+    }
 
-    void pushFrame(float* frame, bool& workingTmp) {
+    void pushFrame(float* frame) {
         std::lock_guard<std::mutex> lg(lock);
         if (pushCtr < popCtr + Constants::MAX_FRAMES_BUFFERED - 1) {
             memcpy(frames[pushCtr % Constants::MAX_FRAMES_BUFFERED].data(), frame, sizeof(float) * (Constants::N * Constants::N + 1));
             pushCtr++;
         }
+    }
+    void checkWorkStatus(bool& workingTmp) {
+        std::lock_guard<std::mutex> lg(lock);
         workingTmp = working;
     }
-    public:
+public:
     constexpr int getLatticeSize() {
         return Constants::N;
     }
@@ -1479,46 +1248,51 @@ private:
             }
             working = true;
         }
-        
-        computeThread = std::thread([&]() {
-            bool workingTmp = true;
-
-            while (workingTmp) {
-                if (nbodyCalcCounter == 0) {
-                    for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-                        gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-                        gpuErrchk(cudaEventRecord(eventStart[device], computeStream[device]));
+        for (int i = 0; i < Constants::NUM_CUDA_DEVICES; i++) {
+            int gpu = i;
+            dedicatedThreads.emplace_back(std::thread([&, gpu]() {
+                int nbodyCalcCounter = 0;
+                bool workingTmp = true;
+                gpuErrchk(cudaSetDevice(cudaDeviceIndices[gpu]));
+                cufftSetStream(fftPlan[gpu], computeStream[gpu]);
+                while (workingTmp) {
+                    if (nbodyCalcCounter == 0) {
+                        gpuErrchk(cudaEventRecord(eventStart[gpu], computeStream[gpu]));
                     }
-                }
-                scatterMassOnLattice();
-                calcLatticeFft2D();
-                multiplyLatticeFilterElementwise();
-                calcLatticeIfft2D();
-                multiSampleForces();
+                    scatterMassOnLattice(gpu, nbodyCalcCounter);
+                    calcLatticeFft2D(gpu);
+                    multiplyLatticeFilterElementwise(gpu);
+                    calcLatticeIfft2D(gpu);
+                    multiSampleForces(gpu);
 
-                nbodyCalcCounter++;
-                if (nbodyCalcCounter == numNbodyStepsPerRender) {
-                    nbodyCalcCounter = 0;
-                    float milliseconds = 0.0f;
-                    for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-                        gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-                        gpuErrchk(cudaEventRecord(eventStop[device], computeStream[device]));
-                        gpuErrchk(cudaStreamSynchronize(computeStream[device]));
+                    nbodyCalcCounter++;
+                    if (nbodyCalcCounter == NUM_TIME_STEPS_PER_RENDER) {
+                        nbodyCalcCounter = 0;
+                        float milliseconds = 0.0f;
+
+                        gpuErrchk(cudaEventRecord(eventStop[gpu], computeStream[gpu]));
+                        gpuErrchk(cudaStreamSynchronize(computeStream[gpu]));
                         float ms;
-                        gpuErrchk(cudaEventElapsedTime(&ms, eventStart[device], eventStop[device]));
+                        gpuErrchk(cudaEventElapsedTime(&ms, eventStart[gpu], eventStop[gpu]));
                         // Selecting longest completion time as total work time.
                         if (ms > milliseconds) {
                             milliseconds = ms;
                         }
+                        if (gpu == 0) {
+                            gpuErrchk(cudaSetDevice(cudaDeviceIndices[0]));
+                            gpuErrchk(cudaMemcpyAsync(frame_h, renderOutput_d[0], sizeof(float) * Constants::N * Constants::N, cudaMemcpyDeviceToHost, computeStream[0]));
+                            gpuErrchk(cudaStreamSynchronize(computeStream[0]));
+                            frame_h[Constants::N * Constants::N] = milliseconds / NUM_TIME_STEPS_PER_RENDER;
+                            pushFrame(frame_h);
+                        }
                     }
-                    gpuErrchk(cudaSetDevice(cudaDeviceIndices[0]));
-                    gpuErrchk(cudaMemcpyAsync(frame_h, renderOutput_d[0], sizeof(float) * Constants::N * Constants::N, cudaMemcpyDeviceToHost, computeStream[0]));
-                    gpuErrchk(cudaStreamSynchronize(computeStream[0]));
-                    frame_h[Constants::N * Constants::N] = milliseconds / numNbodyStepsPerRender;
-                    pushFrame(frame_h, workingTmp);
+                    checkWorkStatus(workingTmp);
                 }
-            }
-        });
+                for (int i = 0; i < NUM_TIME_STEPS_PER_RENDER; i++) {
+                    timeStepBarriers[i].wait(true);
+                }
+            }));
+        }
     }
     // returns frame pixels + last element as elapsed milliseconds per time-step.
     std::vector<float>& popFrame() {
@@ -1537,7 +1311,11 @@ private:
             std::lock_guard<std::mutex> lg(lock);
             working = false;
         }
-        computeThread.join();
+        for (int i = 0; i < Constants::NUM_CUDA_DEVICES; i++) {
+            if (dedicatedThreads[i].joinable()) {
+                dedicatedThreads[i].join();
+            }
+        }
     }
     ~Universe() {
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
@@ -1550,6 +1328,8 @@ private:
             gpuErrchk(cudaFreeAsync(latticeShifted_d[device], computeStream[device]));
             gpuErrchk(cudaFreeAsync(latticeShiftedForceXY_d[device], computeStream[device]));
             gpuErrchk(cudaFreeAsync(filter_d[device], computeStream[device]));
+            gpuErrchk(cudaFreeAsync(deconvFilter_d[device], computeStream[device]));
+            
             gpuErrchk(cudaFreeAsync(x_d[device], computeStream[device]));
             gpuErrchk(cudaFreeAsync(y_d[device], computeStream[device]));
             gpuErrchk(cudaFreeAsync(xOld_d[device], computeStream[device]));
@@ -1563,10 +1343,10 @@ private:
         }
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
+            cufftSetStream(fftPlan[device], computeStream[device]);
+            cufftDestroy(fftPlan[device]);
             gpuErrchk(cudaStreamSynchronize(computeStream[device]));
             gpuErrchk(cudaStreamDestroy(computeStream[device]));
-            gpuErrchk(cudaStreamSynchronize(broadcastStream[device]));
-            gpuErrchk(cudaStreamDestroy(broadcastStream[device]));
         }
         gpuErrchk(cudaFreeHost(broadcast_h));
         gpuErrchk(cudaFreeHost(frame_h));
