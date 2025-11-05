@@ -17,7 +17,7 @@ Algorithm:
 - Mass values of particles are projected onto a lattice of 2048x2048 cells (this Constants::N value can be changed from header)
 - The lattice is sent to two convolution operations.
 - - FFT for infinite ranged forces (filter weights = 1 / r)
-- - 33x33 direct convolution for short-ranged forces (filter weights = 1 / r)
+- - deconvolution of mass-scatter kernel for short-ranged forces (to undo self-pull)
 - Each convolution has weights close to center to have zero value to avoid particles pulling themselves
 - Then both results are summed elementwise to have a total potential
 - Gradient of the potential is sampled by each particle and used as force acting on them
