@@ -841,7 +841,6 @@ private:
     int numParticles[Constants::NUM_CUDA_DEVICES];
     int particleOffsets[Constants::NUM_CUDA_DEVICES];
     int totalNumParticles;
-    std::mt19937 rng;
 
     // For device
     cufftHandle fftPlan[Constants::NUM_CUDA_DEVICES];
@@ -928,15 +927,29 @@ public:
         m.resize(particles);
         gpuErrchk(cudaMallocHost(&broadcast_h, sizeof(float) * Constants::N * Constants::N * Constants::NUM_CUDA_DEVICES));
         gpuErrchk(cudaMallocHost(&frame_h, sizeof(float) * (Constants::N * Constants::N)));
-        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-        for (int i = 0; i < particles; i++) {
-            x[i] = 0.01f * Constants::N + (0.98f * dist(rng) * Constants::N);
-            y[i] = 0.01f * Constants::N + (0.98f * dist(rng) * Constants::N);
-            xOld[i] = x[i];
-            yOld[i] = y[i];
-            m[i] = 1.0f / sum;
+        
+        std::vector<std::thread> initThreads;
+        const int numThreads = std::thread::hardware_concurrency();
+        for (int th = 0; th < numThreads; th++) {
+            initThreads.emplace_back([&, th, numThreads]() {
+                std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+                std::random_device rd;
+                std::mt19937 rng = std::mt19937(rd());
+                // Cpu-stride loop.
+                const int workSize = particles;
+                const int chunkSize = (workSize + numThreads - 1) / numThreads;
+                for (int i = th * chunkSize; i < (th + 1) * chunkSize; i++) {
+                    if (i < particles) {
+                        x[i] = 0.01f * Constants::N + (0.98f * dist(rng) * Constants::N);
+                        y[i] = 0.01f * Constants::N + (0.98f * dist(rng) * Constants::N);
+                        xOld[i] = x[i];
+                        yOld[i] = y[i];
+                        m[i] = 1.0f / sum;
+                    }
+                }
+                });
         }
-
+        for (int th = 0; th < numThreads; th++) { initThreads[th].join(); }
         // For rendering.
         std::vector<float> renderFilter(Constants::BLUR_R * Constants::BLUR_R);
         for (int iy = -Constants::BLUR_HALF_R; iy <= Constants::BLUR_HALF_R; iy++) {
@@ -952,7 +965,7 @@ public:
             }
         }
         particleCounter = particles;
-        rng = std::mt19937(static_cast<unsigned int>(std::time(0)));
+        
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             cudaDeviceIndices[device] = cudaDevices[device];
 
@@ -1023,12 +1036,27 @@ public:
 
     // Moves all particles out of simulation area.
     void clear() {
-        for (int i = 0; i < totalNumParticles; i++) {
-            x[i] = -10.0f;
-            y[i] = -10.0f;
-            xOld[i] = -10.0f;
-            yOld[i] = -10.0f;
+        std::vector<std::thread> initThreads;
+        const int numThreads = std::thread::hardware_concurrency();
+        for (int th = 0; th < numThreads; th++) {
+            initThreads.emplace_back([&, th, numThreads]() {
+                std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+                std::random_device rd;
+                std::mt19937 rng = std::mt19937(rd());
+                // Cpu-stride loop.
+                const int workSize = totalNumParticles;
+                const int chunkSize = (workSize + numThreads - 1) / numThreads;
+                for (int i = th * chunkSize; i < (th + 1) * chunkSize; i++) {
+                    if (i < totalNumParticles) {
+                        x[i] = -10.0f;
+                        y[i] = -10.0f;
+                        xOld[i] = -10.0f;
+                        yOld[i] = -10.0f;
+                    }
+                }
+                });
         }
+        for (int th = 0; th < numThreads; th++) { initThreads[th].join(); }
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
             gpuErrchk(cudaMemcpyAsync(x_d[device], x.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
@@ -1046,35 +1074,49 @@ public:
     void addGalaxy(int n, float normalizedCenterX = 0.5f, float normalizedCenterY = 0.5f, float angularVelocity = 1.0f, float massPerParticle = 1.0f, float normalizedRadius = 0.3f, float centerOfMassVelocityX = 0.0f, float centerOfMassVelocityY = 0.0f, bool blackHole = false) {
         const int maxCount = min(particleCounter + n, totalNumParticles);
         angularVelocity /= Constants::dt;
-        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
         const float radiusSquared = (Constants::N * normalizedRadius) * (Constants::N * normalizedRadius);
         const float totalMass = massPerParticle * (maxCount - particleCounter) + (blackHole ? (maxCount - particleCounter) * massPerParticle / 1000.0f : 0.0f);
         centerOfMassVelocityX /= Constants::dt;
         centerOfMassVelocityY /= Constants::dt;
-        for (int i = particleCounter; i < maxCount; i++) {
-            const float r = (0.1f + 0.9f * dist(rng)) * (Constants::N * normalizedRadius);
-            const float a = Constants::MATH_PI * 2.0 * dist(rng);
-            const float characteristicSpeedScaling = sqrtf(0.0000044f * totalMass * r / radiusSquared);
-            // orbit position
-            x[i] = r * cos(a) + normalizedCenterX * Constants::N;
-            y[i] = r * sin(a) + normalizedCenterY * Constants::N;
-            const float vecX = x[i] - normalizedCenterX * Constants::N;
-            const float vecY = y[i] - normalizedCenterY * Constants::N;
-            // orbit velocity
-            xOld[i] = -Constants::dt * ((vecY * angularVelocity) * characteristicSpeedScaling + centerOfMassVelocityX * Constants::N) + x[i];
-            yOld[i] = -Constants::dt * ((-vecX * angularVelocity) * characteristicSpeedScaling + centerOfMassVelocityY * Constants::N) + y[i];
-            m[i] = massPerParticle / totalNumParticles;
+        const int numThreads = std::thread::hardware_concurrency();
+        std::vector<std::thread> initThreads;
+        for (int th = 0; th < numThreads; th++) {
+            initThreads.emplace_back([&, th, numThreads]() {
+                std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+                std::random_device rd;
+                std::mt19937 rng = std::mt19937(rd());
+                // Cpu-stride loop.
+                const int workSize = (maxCount - particleCounter);
+                const int chunkSize = (workSize + numThreads - 1) / numThreads;
+                for (int i = particleCounter + th * chunkSize; i < particleCounter + (th + 1) * chunkSize; i++) {
+                    if (i < maxCount) {
+                        const float r = (0.1f + 0.9f * dist(rng)) * (Constants::N * normalizedRadius);
+                        const float a = Constants::MATH_PI * 2.0 * dist(rng);
+                        const float characteristicSpeedScaling = sqrtf(0.0000044f * totalMass * r / radiusSquared);
+                        // orbit position
+                        x[i] = r * cos(a) + normalizedCenterX * Constants::N;
+                        y[i] = r * sin(a) + normalizedCenterY * Constants::N;
+                        const float vecX = x[i] - normalizedCenterX * Constants::N;
+                        const float vecY = y[i] - normalizedCenterY * Constants::N;
+                        // orbit velocity
+                        xOld[i] = -Constants::dt * ((vecY * angularVelocity) * characteristicSpeedScaling + centerOfMassVelocityX * Constants::N) + x[i];
+                        yOld[i] = -Constants::dt * ((-vecX * angularVelocity) * characteristicSpeedScaling + centerOfMassVelocityY * Constants::N) + y[i];
+                        m[i] = massPerParticle / totalNumParticles;
 
-            if (i == maxCount - 1) {
-                if (blackHole) {
-                    x[i] = normalizedCenterX * Constants::N;
-                    y[i] = normalizedCenterY * Constants::N;
-                    xOld[i] = x[i] - centerOfMassVelocityX * Constants::N * Constants::dt;
-                    yOld[i] = y[i] - centerOfMassVelocityY * Constants::N * Constants::dt;
-                    m[i] = ((maxCount - particleCounter) * massPerParticle / 1000.0f) / totalNumParticles;
+                        if (i == maxCount - 1) {
+                            if (blackHole) {
+                                x[i] = normalizedCenterX * Constants::N;
+                                y[i] = normalizedCenterY * Constants::N;
+                                xOld[i] = x[i] - centerOfMassVelocityX * Constants::N * Constants::dt;
+                                yOld[i] = y[i] - centerOfMassVelocityY * Constants::N * Constants::dt;
+                                m[i] = ((maxCount - particleCounter) * massPerParticle / 1000.0f) / totalNumParticles;
+                            }
+                        }
+                    }
                 }
-            }
+            });
         }
+        for (int th = 0; th < numThreads; th++) { initThreads[th].join(); }
         particleCounter = maxCount;
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
             gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));

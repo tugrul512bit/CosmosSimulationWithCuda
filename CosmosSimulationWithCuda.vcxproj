@@ -43,6 +43,9 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LinkIncremental>true</LinkIncremental>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <EnableManagedIncrementalBuild>true</EnableManagedIncrementalBuild>
+  </PropertyGroup>
   <PropertyGroup Label="Vcpkg">
     <VcpkgEnableManifest>true</VcpkgEnableManifest>
   </PropertyGroup>
@@ -90,6 +93,7 @@
       <SplitCompileCustomThreads>12</SplitCompileCustomThreads>
       <FastCompile>Off</FastCompile>
       <FastMath>true</FastMath>
+      <Runtime>InheritFromHost</Runtime>
     </CudaCompile>
     <CudaLink>
       <Optimization>O3</Optimization>
