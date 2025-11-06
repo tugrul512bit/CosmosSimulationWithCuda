@@ -6,7 +6,6 @@ Real-time N-body algorithm for a billion particles (2.3GB memory per 100M partic
 - Multi-GPU work distribution: particles are computed only in their own GPUs.
 - GPU-GPU communication: partially overlaps with computations to hide latency.
 - Render: frames are generated asynchronously and buffered to the user's thread, further hiding latency.
-- Real-time performance for 500 million particles, with 2 main-stream CUDA GPUs.
 ![paint tool](/galaxy-brush.png)
 ![timeline](/timeline.png)
 ![time 1](/t1.png)
@@ -16,10 +15,9 @@ Real-time N-body algorithm for a billion particles (2.3GB memory per 100M partic
 
 Algorithm: 
 - Mass values of particles are projected onto a lattice of 2048x2048 cells (this Constants::N value can be changed from header)
-- The lattice is sent to two convolution operations.
+- The lattice is sent to convolution operation.
 - - FFT for infinite ranged forces (filter weights = 1 / r)
 - - deconvolution of mass-scatter kernel for short-ranged forces (to undo self-pull)
-- Each convolution has weights close to center to have zero value to avoid particles pulling themselves
 - Then both results are summed elementwise to have a total potential
 - Gradient of the potential is sampled by each particle and used as force acting on them
 - Euler integration is used for velocity and position updates (when other parts are optimized for higher accuracy, this will become Verlet Integration)
