@@ -1040,9 +1040,6 @@ public:
         const int numThreads = std::thread::hardware_concurrency();
         for (int th = 0; th < numThreads; th++) {
             initThreads.emplace_back([&, th, numThreads]() {
-                std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-                std::random_device rd;
-                std::mt19937 rng = std::mt19937(rd());
                 // Cpu-stride loop.
                 const int workSize = totalNumParticles;
                 const int chunkSize = (workSize + numThreads - 1) / numThreads;
@@ -1117,18 +1114,56 @@ public:
             });
         }
         for (int th = 0; th < numThreads; th++) { initThreads[th].join(); }
+        const int start = particleCounter;
+        const int stop = maxCount;
         particleCounter = maxCount;
+        bool cache[Constants::NUM_CUDA_DEVICES];
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-            gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-            gpuErrchk(cudaMemcpyAsync(x_d[device], x.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
-            gpuErrchk(cudaMemcpyAsync(y_d[device], y.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
-            gpuErrchk(cudaMemcpyAsync(xOld_d[device], xOld.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
-            gpuErrchk(cudaMemcpyAsync(yOld_d[device], yOld.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
-            gpuErrchk(cudaMemcpyAsync(m_d[device], m.data() + (particleOffsets[device]), sizeof(float) * numParticles[device], cudaMemcpyHostToDevice, computeStream[device]));
+            bool copy = false;
+            int copyLength = 0;
+            int copyStartDestination = 0;
+            int copyStartSource = 0;
+
+            if (start < particleOffsets[device] && stop > particleOffsets[device] + numParticles[device]) {
+                copy = true;
+                copyLength = numParticles[device];
+                copyStartDestination = 0;
+                copyStartSource = particleOffsets[device];
+            } else if(start < particleOffsets[device] && stop > particleOffsets[device] && stop <= particleOffsets[device] + numParticles[device]){
+                copy = true;
+                copyLength = stop - particleOffsets[device];
+                copyStartDestination = 0;
+                copyStartSource = particleOffsets[device];
+            } else if (start >= particleOffsets[device] && stop <= particleOffsets[device] + numParticles[device]) {
+                copy = true;
+                copyLength = stop - start;
+                copyStartDestination = start - particleOffsets[device];
+                copyStartSource = start;
+            } else if (start >= particleOffsets[device] && start < particleOffsets[device] + numParticles[device] && stop > particleOffsets[device] + numParticles[device]) {
+                copy = true;
+                copyLength = numParticles[device] - (start - particleOffsets[device]);
+                copyStartDestination = start - particleOffsets[device];
+                copyStartSource = start;
+            }
+            cache[device] = (copy && copyLength > 0);
+            if(cache[device]){
+                gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
+                gpuErrchk(cudaMemcpyAsync(x_d[device] + copyStartDestination, x.data() + copyStartSource, sizeof(float) * copyLength, cudaMemcpyHostToDevice, computeStream[device]));
+                gpuErrchk(cudaMemcpyAsync(y_d[device] + copyStartDestination, y.data() + copyStartSource, sizeof(float) * copyLength, cudaMemcpyHostToDevice, computeStream[device]));
+                gpuErrchk(cudaMemcpyAsync(xOld_d[device] + copyStartDestination, xOld.data() + copyStartSource, sizeof(float) * copyLength, cudaMemcpyHostToDevice, computeStream[device]));
+                gpuErrchk(cudaMemcpyAsync(yOld_d[device] + copyStartDestination, yOld.data() + copyStartSource, sizeof(float) * copyLength, cudaMemcpyHostToDevice, computeStream[device]));
+                gpuErrchk(cudaMemcpyAsync(m_d[device] + copyStartDestination, m.data() + copyStartSource, sizeof(float) * copyLength, cudaMemcpyHostToDevice, computeStream[device]));
+            }
         }
         for (int device = 0; device < Constants::NUM_CUDA_DEVICES; device++) {
-            gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
-            gpuErrchk(cudaStreamSynchronize(computeStream[device]));
+            if (cache[device]) {
+                gpuErrchk(cudaSetDevice(cudaDeviceIndices[device]));
+                gpuErrchk(cudaStreamSynchronize(computeStream[device]));
+            }
+        }
+
+        if (particleCounter >= totalNumParticles) {
+            particleCounter = 0;
         }
     }
 private:

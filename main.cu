@@ -24,8 +24,11 @@ namespace OVERRIDE_CONSTANTS {
     constexpr int BLUR_R = 3;
 }
 #include "CosmosCuda.cuh"
+
 int main() {
     cv::namedWindow("Fast Nbody");
+
+
     // Multiple time-steps can be computed before each render.
     constexpr int NUM_TIME_STEPS_PER_RENDER = 2;
     // 100M particles require 2.3GB memory. Distributed to multiple gpus (in same ratio with devicePerformance[Constants::NUM_CUDA_DEVICES]).
@@ -64,6 +67,16 @@ int main() {
         const bool addBlackHoleToCenter = true;
         cosmos.addGalaxy(numParticlesPerGalaxy, centerOfGalaxyX, centerOfGalaxyY, angularVelocityOfGalaxy, massPerParticle, radiusOfGalaxy, firstGalaxyCenterOfMassVelocityX, firstGalaxyCenterOfMassVelocityY, addBlackHoleToCenter);
         cosmos.addGalaxy(numParticlesPerGalaxy, centerOfGalaxyX + 0.50f, centerOfGalaxyY + 0.50f, angularVelocityOfGalaxy, massPerParticle, radiusOfGalaxy, secondGalaxyCenterOfMassVelocityX, secondGalaxyCenterOfMassVelocityY, addBlackHoleToCenter);
+        struct ClickEventHandler {
+            static void onClick(int  event, int  x, int  y, int  flag, void* param)
+            {
+                Universe<NUM_TIME_STEPS_PER_RENDER>* space = (Universe<NUM_TIME_STEPS_PER_RENDER>*)param;
+                if (event == cv::EVENT_LBUTTONDOWN) {
+                    space->addGalaxy(20000000, x / (float)w, y / (float)h, 0.005f, 1.0f, 0.15f, 0, 0, addBlackHoleToCenter);
+                }
+            }
+        };
+        cv::setMouseCallback("Fast Nbody", (cv::MouseCallback)ClickEventHandler::onClick, &cosmos);
     }
     // For rendering output.
     cv::Mat mat = cv::Mat(cv::Size2i(cosmos.getLatticeSize(), cosmos.getLatticeSize()), CV_32FC1);
@@ -74,19 +87,19 @@ int main() {
     int frameCount = 0;
     auto t0 = std::chrono::high_resolution_clock::now();
     float fps = 0;
+
+
     while(true){
         bool ready;
         std::vector<float> frame = cosmos.popFrame(ready);
 
         if (ready) {
-            // Clear render output.
-            mat.setTo(cv::Scalar(0.0f));
             // Copy lattice to opencv mat.
             const int n = frame.size() - 1;
             memcpy(mat.data, frame.data(), sizeof(float) * n);
             cv::Mat resized;
             cv::Mat resizedColored;
-            cv::resize(mat, resized, cv::Size(w, h), 0, 0, cv::INTER_LANCZOS4);
+            cv::resize(mat, resized, cv::Size(w, h), 0, 0, cv::INTER_AREA);
             resized.convertTo(resizedColored, CV_8UC3, 255.0f);
             cv::applyColorMap(resizedColored, resizedColored, cv::COLORMAP_JET);
             cv::putText(resizedColored,
@@ -103,6 +116,14 @@ int main() {
                 cv::FONT_HERSHEY_COMPLEX_SMALL,
                 1.2,
                 cv::Scalar(0, 0, 255),
+                2,
+                cv::LINE_AA);
+            cv::putText(resizedColored,
+                "Click anywhere to add a galaxy",
+                cv::Point(5, 75),
+                cv::FONT_HERSHEY_COMPLEX_SMALL,
+                1.2,
+                cv::Scalar(0, 185, 118),
                 2,
                 cv::LINE_AA);
             cv::imshow("Fast Nbody", resizedColored);
