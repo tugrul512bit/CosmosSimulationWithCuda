@@ -7,7 +7,8 @@ Real-time N-body algorithm for a billion particles (2.3GB memory per 100M partic
 - GPU-GPU communication: partially overlaps with computations to hide latency.
 - Render: frames are generated asynchronously and buffered to the user's thread, further hiding latency.
 - Real-time performance for 500 million particles, with 2 main-stream CUDA GPUs.
-![time 1](/timeline.png)
+![paint tool](/galaxy-brush.png)
+![timeline](/timeline.png)
 ![time 1](/t1.png)
 ![time 2](/t2.png)
 ![time 3](/t3.png)
