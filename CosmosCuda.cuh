@@ -1172,13 +1172,19 @@ private:
             std::unique_lock<std::mutex> lock(lockMutex); 
             count = 0; 
             waitCount = 0; 
+            end = false;
         } 
-        void wait(bool stopAll = false) { 
-            std::unique_lock<std::mutex> lock(lockMutex); 
+        bool wait(bool stopAll = false) { 
+            std::unique_lock<std::mutex> lock(lockMutex);
+            if (end) {
+                return true;
+            }
+
             if (stopAll) { 
+                end = true;
                 waitCount++;
                 cv.notify_all(); 
-                return; 
+                return end; 
             } 
             unsigned int currentCounter = count; 
             waitCount++; 
@@ -1187,19 +1193,20 @@ private:
                 count++; 
                 cv.notify_all(); 
             } else { 
-                cv.wait(lock, [this, currentCounter] { return currentCounter != count; }); 
-            } 
+                cv.wait(lock, [this, currentCounter] { return (currentCounter != count) || end; }); 
+            }
+            return end;
         } 
         private: 
+        bool end;
         std::mutex lockMutex; 
         std::condition_variable cv; 
         int count; 
         int waitCount; 
     };
     Barrier timeStepBarriers[NUM_TIME_STEPS_PER_RENDER];
-
+    Barrier exitBarrier;
     void scatterMassOnLattice(int gpu, int nbodyCalcCounter) {
-
         if (Constants::NUM_CUDA_DEVICES > 1) {;
             // Device - device broadcast: send
             Kernels::k_clearAccumulator<Constants::N> << <numBlocks[gpu], Constants::THREADS, 0, computeStream[gpu] >> > (accumulator_d[gpu]);
@@ -1209,7 +1216,11 @@ private:
                 sizeof(float) * Constants::N * Constants::N,
                 cudaMemcpyDeviceToHost, computeStream[gpu]));
             gpuErrchk(cudaEventRecord(latticeBroadcastEvent[gpu], computeStream[gpu]));
-            timeStepBarriers[nbodyCalcCounter].wait();
+            bool end = timeStepBarriers[nbodyCalcCounter].wait();
+            if (end) {
+                return;
+            }
+
             // broadcast: receive
             for (int device2 = 0; device2 < Constants::NUM_CUDA_DEVICES; device2++) {
                 if (gpu != device2) {
@@ -1303,7 +1314,7 @@ private:
     constexpr int getLatticeSize() {
         return Constants::N;
     }
-
+    bool exitedSignal[Constants::NUM_CUDA_DEVICES];
     void nBodyStartGeneratingFrames() {
         {
             std::lock_guard<std::mutex> lg(lock);
@@ -1322,7 +1333,7 @@ private:
                 bool workingTmp = true;
                 gpuErrchk(cudaSetDevice(cudaDeviceIndices[gpu]));
                 cufftSetStream(fftPlan[gpu], computeStream[gpu]);
-                while (workingTmp) {
+                while (true) {
                     scatterMassOnLattice(gpu, nbodyCalcCounter);
                     calcLatticeFft2D(gpu);
                     multiplyLatticeFilterElementwise(gpu);
@@ -1333,19 +1344,21 @@ private:
                     if (nbodyCalcCounter == NUM_TIME_STEPS_PER_RENDER) {
                         nbodyCalcCounter = 0;
                         gpuErrchk(cudaStreamSynchronize(computeStream[gpu]));
-                        
                         if (gpu == 0) {
-                            gpuErrchk(cudaSetDevice(cudaDeviceIndices[0]));
                             gpuErrchk(cudaMemcpyAsync(frame_h, renderOutput_d[0], sizeof(float) * Constants::N * Constants::N, cudaMemcpyDeviceToHost, computeStream[0]));
                             gpuErrchk(cudaStreamSynchronize(computeStream[0]));
                             pushFrame(frame_h);
                         }
+                        // Due to work being async, it should exit only after completing pipeline.
+                        checkWorkStatus(workingTmp);
+                        
+                        bool end = exitBarrier.wait(!workingTmp);
+                        if (end) {
+                            break;
+                        }
                     }
-                    checkWorkStatus(workingTmp);
                 }
-                for (int i = 0; i < NUM_TIME_STEPS_PER_RENDER; i++) {
-                    timeStepBarriers[i].wait(true);
-                }
+                
             }));
         }
     }
@@ -1370,6 +1383,10 @@ private:
             std::lock_guard<std::mutex> lg(lock);
             working = false;
         }
+        for (int i = 0; i < NUM_TIME_STEPS_PER_RENDER; i++) {
+            timeStepBarriers[i].wait(true);
+        }
+
         for (int i = 0; i < Constants::NUM_CUDA_DEVICES; i++) {
             if (dedicatedThreads[i].joinable()) {
                 dedicatedThreads[i].join();

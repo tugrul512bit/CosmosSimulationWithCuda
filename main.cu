@@ -141,7 +141,10 @@ int main() {
         }
     }
     // Stop cpu thread that is generating frames.
+    std::cout << "exiting app..." << std::endl;
     cosmos.nBodyStop();
+    std::cout << "nbody: stopped" << std::endl;
     cv::destroyAllWindows();
+    std::cout << "window: destroyed" << std::endl;
     return 0;
 }
